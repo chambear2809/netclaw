@@ -1,0 +1,50 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 128
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+
+exporters:
+  otlp_grpc/splunk:
+    endpoint: splunk-otel-collector-agent.otel-splunk.svc.cluster.local:4317
+    tls:
+      insecure: true
+  otlp_http/galileo:
+    # Galileo's OTLP ingest path is /otel/traces; use the signal-specific
+    # setting so the exporter sends the URL unchanged.
+    traces_endpoint: https://api.demo-v2.galileocloud.io/otel/traces
+    headers:
+      Galileo-API-Key: ${env:GALILEO_API_KEY}
+      project: network
+      logstream: netclaw
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/splunk, otlp_http/galileo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/splunk]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/splunk]

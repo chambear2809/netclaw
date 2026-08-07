@@ -473,49 +473,11 @@ component_install_pyats() {
 log_step "Installing pyATS MCP Server..."
 echo "  Source: https://github.com/automateyournetwork/pyATS_MCP"
 
-# pyATS ships wheels for Python 3.9–3.13 only — on newer Pythons the pip
-# install fails, so check up front and give a real path forward.
-PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)' 2>/dev/null || echo 0)
-PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo 0)
-if [ "$PY_MAJOR" -ne 3 ] || [ "$PY_MINOR" -lt 9 ] || [ "$PY_MINOR" -gt 13 ]; then
-    log_error "pyATS supports Python 3.9–3.13 — found $(python3 --version 2>/dev/null || echo 'no python3')."
-    ALT_PY=""
-    for v in 3.13 3.12 3.11 3.10; do
-        if command -v "python$v" &> /dev/null; then ALT_PY="python$v"; break; fi
-    done
-    if [ -n "$ALT_PY" ]; then
-        log_warn "This system has $ALT_PY — install pyATS into a venv with:"
-        echo "    $ALT_PY -m venv ~/.openclaw/pyats-venv"
-        echo "    ~/.openclaw/pyats-venv/bin/pip install 'pyats[full]' mcp pydantic python-dotenv"
-    else
-        log_warn "Install Python 3.13 first (e.g. 'sudo apt install python3.13 python3.13-venv', or pyenv), then re-run:"
-        echo "    ./scripts/install.sh --components pyats"
-    fi
-    echo ""
+if ! "$NETCLAW_DIR/scripts/pyats-venv-setup.sh"; then
+    log_error "pyATS isolated runtime setup failed."
     return 1
 fi
-
-PYATS_MCP_DIR="$MCP_DIR/pyATS_MCP"
-clone_or_pull "$PYATS_MCP_DIR" "https://github.com/automateyournetwork/pyATS_MCP.git"
-
-log_info "Installing Python dependencies..."
-if ! netclaw_pip_install -r "$PYATS_MCP_DIR/requirements.txt" 2>/dev/null; then
-    log_warn "requirements.txt install failed — trying the direct package set..."
-    if ! netclaw_pip_install "pyats[full]" mcp pydantic python-dotenv; then
-        log_error "pyATS Python dependencies failed to install (see pip output above)."
-        log_warn "Fix the pip error, then retry with: ./scripts/install.sh --add \"pyats\""
-        echo ""
-        return 1
-    fi
-fi
-
-if [ -f "$PYATS_MCP_DIR/pyats_mcp_server.py" ]; then
-    log_info "pyATS MCP ready: $PYATS_MCP_DIR/pyats_mcp_server.py"
-else
-    log_error "pyats_mcp_server.py not found after clone"
-    echo ""
-    return 1
-fi
+log_info "pyATS MCP ready: $MCP_DIR/pyATS_MCP/pyats_mcp_server.py"
 
 echo ""
 }
@@ -669,15 +631,11 @@ component_install_gait() {
 log_step "Installing GAIT MCP Server..."
 echo "  Source: https://github.com/automateyournetwork/gait_mcp"
 
-GAIT_MCP_DIR="$MCP_DIR/gait_mcp"
-clone_or_pull "$GAIT_MCP_DIR" "https://github.com/automateyournetwork/gait_mcp.git"
-
-log_info "Installing GAIT dependencies..."
-netclaw_pip_install mcp fastmcp gait-ai 2>/dev/null || log_warn "Some GAIT deps failed"
-
-[ -f "$GAIT_MCP_DIR/gait_mcp.py" ] && \
-    log_info "GAIT MCP ready: $GAIT_MCP_DIR/gait_mcp.py (runs via gait-stdio.py wrapper)" || \
-    log_error "gait_mcp.py not found"
+if ! "$NETCLAW_DIR/scripts/gait-venv-setup.sh"; then
+    log_error "GAIT isolated runtime setup failed."
+    return 1
+fi
+log_info "GAIT MCP ready in $HOME/.openclaw/gait-venv (runs via gait-stdio.py wrapper)"
 
 echo ""
 }
@@ -2968,6 +2926,7 @@ _set_env_var() {
 
 _set_env_var "PYATS_TESTBED_PATH"       "$TESTBED_PATH"
 _set_env_var "PYATS_MCP_SCRIPT"         "$PYATS_SCRIPT"
+_set_env_var "PYATS_PYTHON"             "${PYATS_PYTHON:-$HOME/.openclaw/pyats-venv/bin/python}"
 _set_env_var "MCP_CALL"                 "$NETCLAW_DIR/scripts/mcp-call.py"
 _set_env_var "MARKMAP_MCP_SCRIPT"       "$MARKMAP_INNER/dist/index.js"
 _set_env_var "GAIT_MCP_SCRIPT"          "$NETCLAW_DIR/scripts/gait-stdio.py"

@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: netclaw
+resources:
+  - resources.yaml
+configMapGenerator:
+  - name: netclaw-config
+    files:
+      - openclaw.json
+  - name: netclaw-otel-collector-config
+    files:
+      - collector.yaml
+images:
+  - name: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw
+    newName: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw
+    digest: sha256:c4a4e5288711fbc1ce0da71ed073736727003ca265ac0a85c754001c0b23c8f0
+  - name: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw-visual
+    newName: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw-visual
+    digest: sha256:a903cc3ddbea4c8717480c7c99d47618181e8499468c5cbe4c3a7fdae05be35d

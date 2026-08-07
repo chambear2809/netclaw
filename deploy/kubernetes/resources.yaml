@@ -1,0 +1,355 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netclaw
+  labels:
+    app.kubernetes.io/part-of: netclaw
+    observability: splunk-galileo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: netclaw-data
+  labels:
+    app.kubernetes.io/name: netclaw
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp2
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netclaw-otel-collector
+  labels:
+    app.kubernetes.io/name: netclaw-otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: netclaw-otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netclaw-otel-collector
+  labels:
+    app.kubernetes.io/name: netclaw-otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netclaw-otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netclaw-otel-collector
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: collector
+          image: quay.io/signalfx/splunk-otel-collector:0.148.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/conf/collector.yaml"]
+          env:
+            - name: GALILEO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: netclaw-observability
+                  key: GALILEO_API_KEY
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: health
+              containerPort: 13133
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          livenessProbe:
+            httpGet: {path: /, port: health}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: config, mountPath: /conf, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: netclaw-otel-collector-config}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: netclaw
+  labels:
+    app.kubernetes.io/name: netclaw
+spec:
+  exporter:
+    # Splunk's injected Node.js instrumentation uses OTLP/HTTP protobuf by
+    # default, so it must use the collector's HTTP receiver rather than gRPC.
+    endpoint: http://netclaw-otel-collector.netclaw.svc.cluster.local:4318
+  propagators: [tracecontext, baggage]
+  sampler:
+    type: parentbased_always_on
+  resource:
+    resourceAttributes:
+      service.name: netclaw
+      service.namespace: netclaw
+      deployment.environment.name: lab
+  nodejs:
+    image: ghcr.io/signalfx/splunk-otel-js/splunk-otel-js:v3.3.0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netclaw
+  labels:
+    app.kubernetes.io/name: netclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: netclaw
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: gateway
+      port: 18789
+      targetPort: gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netclaw-ui
+  labels:
+    app.kubernetes.io/name: netclaw
+    app.kubernetes.io/component: visual
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:637423309390:certificate/a1608c2c-82e0-41a4-985d-5b10715e3556
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    # The Classic ELB currently uses the legacy ELBSecurityPolicy-2016-08.
+    # This policy limits client TLS negotiation to TLS 1.2.
+    service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges: [0.0.0.0/0]
+  selector:
+    app.kubernetes.io/name: netclaw
+    app.kubernetes.io/component: visual
+  ports:
+    - name: https
+      port: 443
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netclaw-visual
+  labels:
+    app.kubernetes.io/name: netclaw
+    app.kubernetes.io/component: visual
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netclaw
+      app.kubernetes.io/component: visual
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netclaw
+        app.kubernetes.io/component: visual
+      annotations:
+        instrumentation.opentelemetry.io/inject-nodejs: netclaw/netclaw
+        instrumentation.opentelemetry.io/container-names: netclaw-visual
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: netclaw-visual
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw-visual:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: NETCLAW_HUD_PUBLIC_MODE, value: "true"}
+            - {name: HUD_ENABLE_CHAT, value: "true"}
+            - {name: OPENCLAW_GATEWAY_BASE_URL, value: "http://netclaw.netclaw.svc.cluster.local:18789"}
+            - {name: OTEL_SERVICE_NAME, value: netclaw-visual}
+            # The hosted Agent Control API uses a dedicated namespace-local
+            # credential. Enable only after its runtime authentication check
+            # passes; the hook fails closed if the service is unavailable.
+            - {name: AGENT_CONTROL_ENABLED, value: "false"}
+            - {name: AGENT_CONTROL_URL, value: "https://agent-control.demo-v2.galileocloud.io"}
+            - {name: AGENT_CONTROL_AGENT_NAME, value: netclaw}
+            - {name: AGENT_CONTROL_TARGET_TYPE, value: log_stream}
+            # Galileo Agent Control resolves attached controls by Log Stream ID,
+            # not by its human-readable name.
+            - {name: AGENT_CONTROL_TARGET_ID, value: "f7a2a83c-b304-452c-b63b-e7b26c7318b3"}
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef: {name: netclaw-runtime, key: OPENCLAW_GATEWAY_TOKEN}
+            - name: NETCLAW_HUD_USERNAME
+              valueFrom:
+                secretKeyRef: {name: netclaw-hud-auth, key: username}
+            - name: NETCLAW_HUD_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: netclaw-hud-auth, key: password}
+          ports:
+            - {name: http, containerPort: 3001}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          livenessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netclaw
+  labels:
+    app.kubernetes.io/name: netclaw
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netclaw
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netclaw
+        app.kubernetes.io/component: gateway
+      annotations:
+        instrumentation.opentelemetry.io/inject-nodejs: netclaw/netclaw
+        instrumentation.opentelemetry.io/container-names: netclaw
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: workspace-seed
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p /var/openclaw/workspace /var/openclaw/analysis
+              if [ ! -f /var/openclaw/.workspace-seeded ]; then
+                cp -R /opt/netclaw/workspace-template/. /var/openclaw/workspace/
+                touch /var/openclaw/.workspace-seeded
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: data, mountPath: /var/openclaw}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: netclaw
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/netclaw:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+          env:
+            - {name: HOME, value: /home/node}
+            - {name: OPENCLAW_CONFIG_DIR, value: /home/node/.openclaw}
+            - {name: NODE_ENV, value: production}
+          envFrom:
+            - secretRef: {name: netclaw-runtime}
+          ports:
+            - {name: gateway, containerPort: 18789}
+          resources:
+            # The gateway's measured steady-state use is about 1.9 GiB.
+            # Reserve 2 GiB so a reschedule does not rely on overcommit.
+            requests: {cpu: 250m, memory: 2Gi}
+            limits: {cpu: "1", memory: 4Gi}
+          startupProbe:
+            httpGet: {path: /healthz, port: gateway}
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: gateway}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /healthz, port: gateway}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: data, mountPath: /home/node/.openclaw}
+            - {name: config, mountPath: /home/node/.openclaw/openclaw.json, subPath: openclaw.json, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: netclaw-data}
+        - name: config
+          configMap: {name: netclaw-config}
+        - name: tmp
+          emptyDir: {}

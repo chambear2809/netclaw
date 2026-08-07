@@ -6,6 +6,19 @@ Skills define *how* tools work. This file is for *your* specifics — the enviro
 
 Devices are defined in `testbed/testbed.yaml`. Update that file with your SSH-accessible Cisco devices.
 
+The local pyATS MCP runs from `~/.openclaw/pyats-venv/bin/python` because
+pyATS supports Python through 3.13 while this Mac's default Python is 3.14.
+Rebuild it with `scripts/pyats-venv-setup.sh`; the script uses public PyPI,
+pins the reviewed MCP source revision, and keeps Setuptools below 81 for
+pyATS 25.2's `pkg_resources` dependency. `pyats_list_devices` does not contact
+devices, but show/config operations still require `NETCLAW_USERNAME`,
+`NETCLAW_PASSWORD`, and `NETCLAW_ENABLE_PASSWORD` in `~/.openclaw/.env`.
+
+GAIT runs from `~/.openclaw/gait-venv` and is rebuilt with
+`scripts/gait-venv-setup.sh`. That setup deliberately ignores workstation
+package-index configuration and installs the reviewed public `gait-ai` and
+`gait-mcp` pins, preventing corporate Artifactory authentication failures.
+
 ```
 ### Example Device Map
 - R1 → 10.1.1.1, Core Router, IOS-XE 17.9
@@ -27,6 +40,9 @@ All credentials are in `~/.openclaw/.env`. Never put credentials in skill files 
 
 ### Connection Details (reference only — actual values in .env)
 - pyATS Testbed       → PYATS_TESTBED_PATH
+- pyATS interpreter   → PYATS_PYTHON (`~/.openclaw/pyats-venv/bin/python`)
+- pyATS MCP server    → PYATS_MCP_SCRIPT
+- pyATS device credentials → NETCLAW_USERNAME, NETCLAW_PASSWORD, NETCLAW_ENABLE_PASSWORD (the testbed uses `%ENV{...}` references; never commit their values)
 - NetBox              → NETBOX_URL, NETBOX_TOKEN
 - ServiceNow          → SERVICENOW_INSTANCE_URL, SERVICENOW_USERNAME, SERVICENOW_PASSWORD
 - Cisco APIC          → APIC_URL, APIC_USERNAME, APIC_PASSWORD
@@ -49,6 +65,7 @@ All credentials are in `~/.openclaw/.env`. Never put credentials in skill files 
 - Twitter MCP         → TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET, TWITTER_HEARTBEAT_ENABLED (default: false)
 - Cisco PSIRT MCP     → CISCO_CLIENT_ID, CISCO_CLIENT_SECRET (OAuth2 client-credentials via id.cisco.com), CISCO_PSIRT_CACHE_DIR, CISCO_PSIRT_CACHE_TTL_S (default 21600)
 - Globalping MCP      → GLOBALPING_TOKEN (bearer, remote endpoint mcp.globalping.dev; 401 without it)
+- Cisco Meraki MCP    → MERAKI_DASHBOARD_API_KEY (read-only Dashboard administrator; Cisco-hosted MCP at mcp.meraki.com)
 ```
 
 ## Detailed Per-Integration Notes
@@ -718,3 +735,60 @@ NetClaw MCP is stdio), and **a container** needed only to isolate the first. Dep
 
 `pyats`/`multivendor-cli` read the device (and win on disagreement) · `netbox`/`nautobot` hold intent, this
 reports discovery · `devnet-catalyst-search` reads docs, this queries an appliance.
+
+## NetClaw Lab Observability
+
+- EKS context: `isovalent-demo`; namespace: `netclaw`.
+- Galileo: `https://console.demo-v2.galileocloud.io`, project `network`, log
+  stream `netclaw`. OTLP ingest uses
+  `https://api.demo-v2.galileocloud.io/otel/traces` with `Galileo-API-Key`,
+  `project`, and `logstream` headers.
+- Splunk O11y: the dedicated `netclaw-otel-collector` forwards OTLP/gRPC to
+  `splunk-otel-collector-agent.otel-splunk.svc.cluster.local:4317`.
+- The injected Node instrumentation is OTLP/HTTP protobuf and must target the
+  dedicated collector on port `4318`; the Visual HUD records complete chat
+  input/output in OpenTelemetry `gen_ai` attributes. This lab has explicit
+  approval to export those attributes unredacted to both backends; API
+  credentials remain Kubernetes Secrets.
+- Galileo classifies the custom HUD span as an LLM call only when it includes
+  `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.input.messages`, and
+  `gen_ai.output.messages`. OpenClaw's OpenAI-compatibility response reports
+  zero-valued usage placeholders, so the authenticated `netclaw-telemetry`
+  gateway plugin correlates the run ID with content-free transcript metadata
+  and supplies the real provider/model, session, per-call usage, cache tokens,
+  cost, and duration. Never export transcript tool results through that plugin;
+  the explicitly approved chat input/output is recorded once at the HUD edge.
+- Current OpenClaw transcripts write the bootstrap correlation marker after the
+  user/model rows for a run. Metadata extraction must bound a run between the
+  preceding marker and the matching current marker; the plugin retains a
+  marker-before fallback for older transcript layouts.
+- Live-verified 2026-08-07 images: gateway
+  `sha256:c4a4e5288711fbc1ce0da71ed073736727003ca265ac0a85c754001c0b23c8f0`;
+  Visual HUD
+  `sha256:a903cc3ddbea4c8717480c7c99d47618181e8499468c5cbe4c3a7fdae05be35d`.
+  Galileo persisted full input/output, actual model/finish reason, and real
+  input/output/total token metrics for controlled marker
+  `GALILEO-LAB-E2E-20260807-FINAL`. The provider reports zero cost; emit that
+  value through OpenInference cost fields rather than inventing pricing.
+- The `netclaw` Log Stream has 14 scorers enabled at 100% sampling:
+  Completeness (SLM), Correctness, Instruction Adherence, Input/Output PII
+  (SLM), Input/Output Toxicity (SLM), Prompt Injection (SLM), Input/Output Tone
+  (SLM), Conversation Quality, Action Completion (SLM), Agent Efficiency, and
+  Agent Flow. The SLM metrics score without an external model integration;
+  the OpenAI-backed judges report `insufficient_quota` until credits are added
+  to Galileo's OpenAI integration. Retriever/tool metrics are intentionally
+  excluded until NetClaw emits eligible retriever/tool spans.
+- Post-configuration marker
+  `GALILEO-METRICS-POSTCONFIG-20260807-192238-UTC` is persisted as span
+  `4c9fb8fa-c642-4a5a-a174-ce35420c4cb9`, trace
+  `21fd0739-a969-43db-839f-a31620a72314`, and session
+  `47c35ffe-662c-444a-aca1-47ef92c01a89`. It verified full input/output plus
+  core, quality, safety, and session metric evaluation.
+- Galileo Enterprise Agent Control has a pre/post LLM hook in the Visual HUD,
+  bound to the `netclaw` Log Stream UUID. It is intentionally inactive until a
+  dedicated `AGENT_CONTROL_API_KEY` is placed in the namespace-local
+  `netclaw-agent-control` Secret; the Galileo OTLP key cannot authenticate to
+  the hosted control endpoint. Once present, enable it with
+  `AGENT_CONTROL_ENABLED=true` and validate a safe pre-stage call before
+  relying on controls. This hook does not intercept upstream OpenClaw MCP tool
+  calls before execution.

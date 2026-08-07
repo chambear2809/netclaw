@@ -34,10 +34,15 @@ def _reexec_into_venv() -> None:
     os.execv(venv_python, [venv_python, os.path.abspath(__file__), *sys.argv[1:]])
 
 
+# Prefer the complete isolated runtime whenever it exists. Checking only
+# whether the system interpreter can import `gait` is insufficient: direct
+# importers need gait-ai, but the MCP wrapper also needs gait_mcp and FastMCP.
+# A partial system install previously prevented the re-exec and broke startup.
+_reexec_into_venv()
+
 try:
     import gait  # noqa: F401
 except ImportError:
-    _reexec_into_venv()
     raise SystemExit(
         f"GAIT unavailable: cannot import 'gait' under {sys.executable} and no "
         f"usable venv at {DEFAULT_VENV}. Run scripts/gait-venv-setup.sh."

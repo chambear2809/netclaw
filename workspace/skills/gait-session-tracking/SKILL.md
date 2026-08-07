@@ -13,7 +13,7 @@ metadata:
 
 ## How to Call the Tools
 
-The GAIT MCP server provides 9 tools. Call them via mcp-call:
+Call the GAIT MCP tools via mcp-call:
 
 ### Check Repository Status
 
@@ -26,7 +26,7 @@ Returns current branch, uncommitted changes, and repository state.
 ### Initialize a New GAIT Repository
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_init '{}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_init '{"path":"."}'
 ```
 
 Creates a new GAIT repository if one does not already exist. Run this once during initial NetClaw setup.
@@ -34,7 +34,7 @@ Creates a new GAIT repository if one does not already exist. Run this once durin
 ### Create a New Branch (SESSION START)
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_branch '{"branch_name":"health-check-r1-2026-02-21"}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_branch '{"name":"health-check-r1-2026-02-21"}'
 ```
 
 **Every session begins here.** Use a descriptive branch name that includes the action type, target device(s), and date. Examples:
@@ -47,7 +47,7 @@ python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_branch '{"branch_name":"hea
 ### Switch to an Existing Branch
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_checkout '{"branch_name":"health-check-r1-2026-02-21"}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_checkout '{"name":"health-check-r1-2026-02-21"}'
 ```
 
 Use this to resume a previous session or switch context between parallel investigations.
@@ -55,13 +55,13 @@ Use this to resume a previous session or switch context between parallel investi
 ### Record an AI Turn (PRIMARY RECORDING TOOL)
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"User asked to check CPU on R1","response":"Ran show processes cpu sorted. CPU 5-min avg: 12%. Status: HEALTHY.","artifacts":["show_proc_cpu_r1.txt"]}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"User asked to check CPU on R1","response":"Ran show processes cpu sorted. CPU 5-min avg: 12%. Status: HEALTHY.","artifacts":[{"path":"show_proc_cpu_r1.txt","content":"<captured command output>"}]}'
 ```
 
 **Record a turn after every significant action.** Each turn captures:
 - **prompt**: What was asked or what triggered the action
 - **response**: What data was collected and what the result was
-- **artifacts**: List of files produced (optional)
+- **artifacts**: Optional list of objects containing both `path` and `content`
 
 ### View Commit History (SESSION END)
 
@@ -74,7 +74,7 @@ python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_log '{}'
 ### Show Commit Details
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_show '{"commit_ref":"HEAD"}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_show '{"commit":"HEAD"}'
 ```
 
 Inspect a specific commit to see its full content. Use `HEAD`, `HEAD~1`, or a commit hash.
@@ -82,7 +82,7 @@ Inspect a specific commit to see its full content. Use `HEAD`, `HEAD~1`, or a co
 ### Pin Important Commits
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_pin '{"commit_ref":"HEAD","label":"pre-change-baseline"}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_pin '{"commit":"HEAD","note":"pre-change-baseline"}'
 ```
 
 Mark critical moments in a session so they can be easily found later. Common pin labels:
@@ -106,7 +106,7 @@ Every NetClaw session follows this exact lifecycle:
 ### 1. Session Start -- Create Branch
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_branch '{"branch_name":"ACTION-TYPE-TARGET-DATE"}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_branch '{"name":"ACTION-TYPE-TARGET-DATE"}'
 ```
 
 ### 2. During Session -- Record Every Turn
@@ -138,25 +138,25 @@ Always show the session log to the user so they have a complete record.
 ### Health Check Turn
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Run full health check on R1","response":"Collected: show version, show processes cpu sorted, show processes memory sorted, show ip interface brief, show interfaces, show ntp associations, show logging. Results: CPU 12% HEALTHY, Memory 45% HEALTHY, Interfaces 4/5 up WARNING (Gi2 down), NTP synced HEALTHY, no critical log patterns. Overall: WARNING.","artifacts":["health-report-r1.txt"]}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Run full health check on R1","response":"Collected: show version, show processes cpu sorted, show processes memory sorted, show ip interface brief, show interfaces, show ntp associations, show logging. Results: CPU 12% HEALTHY, Memory 45% HEALTHY, Interfaces 4/5 up WARNING (Gi2 down), NTP synced HEALTHY, no critical log patterns. Overall: WARNING.","artifacts":[{"path":"health-report-r1.txt","content":"<health report content>"}]}'
 ```
 
 ### Configuration Change Turn
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Apply ACL update to block 192.168.50.0/24 on R1 Gi1","response":"Pre-change: captured running-config. Applied: ip access-list extended BLOCK-LIST, permit/deny entries. Post-change: verified ACL in show access-lists, tested with ping from blocked subnet -- dropped as expected. Change verified successfully.","artifacts":["pre-change-config-r1.txt","post-change-config-r1.txt","acl-diff.txt"]}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Apply ACL update to block 192.168.50.0/24 on R1 Gi1","response":"Pre-change: captured running-config. Applied: ip access-list extended BLOCK-LIST, permit/deny entries. Post-change: verified ACL in show access-lists, tested with ping from blocked subnet -- dropped as expected. Change verified successfully.","artifacts":[{"path":"pre-change-config-r1.txt","content":"<pre-change config>"},{"path":"post-change-config-r1.txt","content":"<post-change config>"},{"path":"acl-diff.txt","content":"<verified diff>"}]}'
 ```
 
 ### Troubleshooting Turn
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Investigate OSPF adjacency failure between R1 and R3","response":"Checked show ip ospf neighbor on R1 -- R3 missing. Checked show ip ospf interface on both -- area mismatch: R1 area 0, R3 area 1 on shared link. Root cause identified: area misconfiguration on R3 Gi0/1.","artifacts":["ospf-neighbor-r1.txt","ospf-interface-r1.txt","ospf-interface-r3.txt"]}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Investigate OSPF adjacency failure between R1 and R3","response":"Checked show ip ospf neighbor on R1 -- R3 missing. Checked show ip ospf interface on both -- area mismatch: R1 area 0, R3 area 1 on shared link. Root cause identified: area misconfiguration on R3 Gi0/1.","artifacts":[{"path":"ospf-neighbor-r1.txt","content":"<neighbor output>"},{"path":"ospf-interface-r1.txt","content":"<R1 interface output>"},{"path":"ospf-interface-r3.txt","content":"<R3 interface output>"}]}'
 ```
 
 ### NetBox Reconciliation Turn
 
 ```bash
-python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Reconcile R1 interfaces against NetBox","response":"Live state: 5 interfaces discovered via show ip interface brief. NetBox state: 4 interfaces documented. Drift detected: Gi5 exists on device but missing from NetBox. Gi2 documented in NetBox but admin-down on device. Reconciliation report generated.","artifacts":["reconcile-report-r1.json"]}'
+python3 $MCP_CALL "python3 -u $GAIT_MCP_SCRIPT" gait_record_turn '{"prompt":"Reconcile R1 interfaces against NetBox","response":"Live state: 5 interfaces discovered via show ip interface brief. NetBox state: 4 interfaces documented. Drift detected: Gi5 exists on device but missing from NetBox. Gi2 documented in NetBox but admin-down on device. Reconciliation report generated.","artifacts":[{"path":"reconcile-report-r1.json","content":"<reconciliation report JSON>"}]}'
 ```
 
 ## Integration with ALL Other Skills

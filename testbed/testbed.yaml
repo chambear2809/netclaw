@@ -2,10 +2,10 @@ testbed:
   name: NetClaw-Full-Topo
   credentials:
     default:
-      username: admin
-      password: C1sco12345
+      username: "%ENV{NETCLAW_USERNAME}"
+      password: "%ENV{NETCLAW_PASSWORD}"
     enable:
-      password: C1sco12345
+      password: "%ENV{NETCLAW_ENABLE_PASSWORD}"
 
 devices:
   R1:

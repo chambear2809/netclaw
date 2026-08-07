@@ -8,20 +8,106 @@ import path from 'path';
 import yaml from 'js-yaml';
 import multer from 'multer';
 import { execFile } from 'child_process';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+import {
+  applySpanAttributes,
+  buildChatCompletionAttributes,
+  buildChatStartAttributes,
+  buildGatewayErrorAttributes,
+  buildGatewayRequestAttributes,
+} from './src/telemetry/chat-telemetry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '../..');
+// Local development continues to use the repository root. The containerised
+// HUD sets NETCLAW_ROOT explicitly so it only needs read-only UI data.
+const ROOT = process.env.NETCLAW_ROOT || path.resolve(__dirname, '../..');
+const PUBLIC_MODE = process.env.NETCLAW_HUD_PUBLIC_MODE === 'true';
+const HUD_USERNAME = process.env.NETCLAW_HUD_USERNAME || '';
+const HUD_PASSWORD = process.env.NETCLAW_HUD_PASSWORD || '';
 const app = express();
+const require = createRequire(import.meta.url);
+const noOpSpan = { setAttribute() {}, setStatus() {}, end() {} };
+let telemetryTracer = { startSpan: () => noOpSpan };
+let SpanStatusCode = { OK: 1, ERROR: 2 };
+const AGENT_CONTROL_ENABLED = process.env.AGENT_CONTROL_ENABLED === 'true';
+const AGENT_CONTROL_URL = (process.env.AGENT_CONTROL_URL || '').replace(/\/$/, '');
+const AGENT_CONTROL_AGENT_NAME = process.env.AGENT_CONTROL_AGENT_NAME || 'netclaw';
+const AGENT_CONTROL_TARGET_TYPE = process.env.AGENT_CONTROL_TARGET_TYPE || 'log_stream';
+const AGENT_CONTROL_TARGET_ID = process.env.AGENT_CONTROL_TARGET_ID || '';
+const AGENT_CONTROL_API_KEY = process.env.AGENT_CONTROL_API_KEY || '';
 
-app.use(cors());
+// The OpenTelemetry Operator mounts this API alongside its injected Node.js
+// bootstrap. Keep local development working without requiring it as a HUD
+// dependency; production always has the mounted copy before this code starts.
+try {
+  const otel = require('/otel-auto-instrumentation-nodejs/node_modules/@opentelemetry/api');
+  telemetryTracer = otel.trace.getTracer('netclaw.visual');
+  SpanStatusCode = otel.SpanStatusCode;
+} catch {
+  // Local, uninstrumented runs deliberately produce no telemetry.
+}
+
+function credentialsMatch(candidate, expected) {
+  const candidateBuffer = Buffer.from(candidate || '');
+  const expectedBuffer = Buffer.from(expected || '');
+  return candidateBuffer.length === expectedBuffer.length
+    && crypto.timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function authorized(request) {
+  if (!PUBLIC_MODE) return true;
+  // Fail closed: the public deployment must never start without both values.
+  if (!HUD_USERNAME || !HUD_PASSWORD) return false;
+  const header = request.headers.authorization || '';
+  if (!header.startsWith('Basic ')) return false;
+  const [username, ...passwordParts] = Buffer.from(header.slice(6), 'base64').toString('utf8').split(':');
+  return credentialsMatch(username, HUD_USERNAME)
+    && credentialsMatch(passwordParts.join(':'), HUD_PASSWORD);
+}
+
+function requireAuthorization(request, response, next) {
+  // Kubernetes probes need an unauthenticated liveness signal. It exposes no
+  // operational data and is the only public-mode exception.
+  if (PUBLIC_MODE && request.path === '/api/health') return next();
+  if (authorized(request)) return next();
+  response.set('WWW-Authenticate', 'Basic realm="NetClaw Visual HUD", charset="UTF-8"');
+  return response.status(PUBLIC_MODE ? 401 : 500).json({ error: 'authentication required' });
+}
+
+function disabledInPublicMode(_request, response, next) {
+  if (PUBLIC_MODE) return response.status(403).json({ error: 'This administrative endpoint is disabled in the public HUD.' });
+  return next();
+}
+
+// Cross-origin browser access is useful for the local developer workflow. A
+// public, credentialed HUD is same-origin only.
+if (!PUBLIC_MODE) app.use(cors());
+app.use(requireAuthorization);
 // The branching canvas can include a compact image or an attached text file in
 // its context. Keep the cap explicit so those requests work without making the
 // API an unbounded JSON sink.
 app.use(express.json({ limit: '4mb' }));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const requestPath = new URL(request.url, 'http://localhost').pathname;
+  if (requestPath !== '/ws') {
+    socket.destroy();
+    return;
+  }
+  if (!authorized(request)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="NetClaw Visual HUD"\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(request, socket, head, (socketConnection) => {
+    wss.emit('connection', socketConnection, request);
+  });
+});
 
 const SKILLS_DIR = path.join(ROOT, 'workspace/skills');
 const TESTBED_FILE = path.join(ROOT, 'testbed/testbed.yaml');
@@ -1088,7 +1174,7 @@ app.get('/api/n2n', async (req, res) => {
 });
 
 // Proxy a claw-to-claw chat message from the HUD to the daemon (FR-025)
-app.post('/api/n2n/chat', async (req, res) => {
+app.post('/api/n2n/chat', disabledInPublicMode, async (req, res) => {
   const { peer, text, session_id } = req.body || {};
   if (!peer || !text) return res.status(400).json({ error: 'expected { peer, text }' });
   try {
@@ -1109,7 +1195,7 @@ app.get('/api/gateway/status', async (req, res) => {
   try {
     // The gateway's /v1 API requires the bearer token — without it we get 401
     // and the HUD falsely shows "offline". Send the token like the chat call does.
-    const health = await fetch(`http://127.0.0.1:${gw.port}/v1/models`, {
+    const health = await fetch(`${gw.apiUrl}/models`, {
       headers: gw.token ? { 'Authorization': `Bearer ${gw.token}` } : {},
       signal: AbortSignal.timeout(2000),
     });
@@ -1145,7 +1231,7 @@ app.get('/api/skill/:skillId', (req, res) => {
 });
 
 // ── ENV config per integration ─────────────────────────────────────
-app.get('/api/env/:integrationId', (req, res) => {
+app.get('/api/env/:integrationId', disabledInPublicMode, (req, res) => {
   const mapping = ENV_MAP[req.params.integrationId];
   if (!mapping) return res.status(404).json({ error: 'Unknown integration' });
 
@@ -1169,7 +1255,7 @@ app.get('/api/env/:integrationId', (req, res) => {
   });
 });
 
-app.put('/api/env', (req, res) => {
+app.put('/api/env', disabledInPublicMode, (req, res) => {
   const { updates } = req.body;
   if (!updates || typeof updates !== 'object') {
     return res.status(400).json({ error: 'Expected { updates: { KEY: "value", ... } }' });
@@ -1186,11 +1272,11 @@ app.put('/api/env', (req, res) => {
 });
 
 // ── Testbed device config ──────────────────────────────────────────
-app.get('/api/testbed/raw', (req, res) => {
+app.get('/api/testbed/raw', disabledInPublicMode, (req, res) => {
   res.type('text/yaml').send(readText(TESTBED_FILE) || '# No testbed found');
 });
 
-app.put('/api/testbed/raw', (req, res) => {
+app.put('/api/testbed/raw', disabledInPublicMode, (req, res) => {
   const { content } = req.body;
   if (!content) return res.status(400).json({ error: 'Expected { content: "yaml string" }' });
 
@@ -1251,20 +1337,130 @@ function textFromChatContent(content) {
     .trim();
 }
 
+function agentControlConfigurationError() {
+  if (!AGENT_CONTROL_ENABLED) return null;
+  if (!AGENT_CONTROL_URL) return 'AGENT_CONTROL_URL is not configured';
+  if (!AGENT_CONTROL_API_KEY) return 'AGENT_CONTROL_API_KEY is not configured';
+  if (!AGENT_CONTROL_TARGET_ID) return 'AGENT_CONTROL_TARGET_ID is not configured';
+  return null;
+}
+
+// The Galileo-hosted Agent Control service evaluates the controls attached to
+// the configured Log Stream. This is deliberately a small direct client rather
+// than a local Agent Control server: operators can change a control in Galileo
+// without changing or redeploying the HUD. A configured control plane is
+// fail-closed so an outage cannot silently bypass the guardrail.
+async function evaluateAgentControl({ stage, input, output = null }) {
+  if (!AGENT_CONTROL_ENABLED) return null;
+  const configurationError = agentControlConfigurationError();
+  if (configurationError) {
+    throw new Error(configurationError);
+  }
+
+  const response = await fetch(`${AGENT_CONTROL_URL}/api/v1/evaluation`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Galileo-API-Key': AGENT_CONTROL_API_KEY,
+    },
+    body: JSON.stringify({
+      agent_name: AGENT_CONTROL_AGENT_NAME,
+      target_type: AGENT_CONTROL_TARGET_TYPE,
+      target_id: AGENT_CONTROL_TARGET_ID,
+      stage,
+      step: {
+        type: 'llm',
+        name: 'netclaw-chat',
+        input,
+        output,
+      },
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Agent Control rejected evaluation (HTTP ${response.status})`);
+  }
+
+  const evaluation = await response.json();
+  if (typeof evaluation?.is_safe !== 'boolean') {
+    throw new Error('Agent Control returned an invalid evaluation result');
+  }
+  return evaluation;
+}
+
+function recordAgentControlEvaluation(span, stage, evaluation) {
+  if (!evaluation) return;
+  const prefix = `netclaw.agent_control.${stage}`;
+  span.setAttribute(`${prefix}.is_safe`, evaluation.is_safe);
+  span.setAttribute(`${prefix}.confidence`, evaluation.confidence ?? 0);
+  span.setAttribute(`${prefix}.matches`, (evaluation.matches || [])
+    .map((match) => match.control_name || match.control_id || 'unnamed-control')
+    .join(','));
+}
+
 // Read OpenClaw gateway config for auth
 function getGatewayConfig() {
+  const configuredBaseUrl = process.env.OPENCLAW_GATEWAY_BASE_URL;
+  if (configuredBaseUrl) {
+    try {
+      const parsed = new URL(configuredBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported protocol');
+      return {
+        apiUrl: `${parsed.origin}/v1`,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        token: process.env.OPENCLAW_GATEWAY_TOKEN || '',
+        chatCompletionsEnabled: process.env.HUD_ENABLE_CHAT === 'true',
+      };
+    } catch {
+      // Fall back to the local developer configuration below.
+    }
+  }
   try {
     const configPath = path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
     const config = JSON.parse(readText(configPath));
     return {
+      apiUrl: `http://127.0.0.1:${config?.gateway?.port || 18789}/v1`,
       port: config?.gateway?.port || 18789,
       token: config?.gateway?.auth?.token || '',
       chatCompletionsEnabled:
         config?.gateway?.http?.endpoints?.chatCompletions?.enabled === true,
     };
   } catch {
-    return { port: 18789, token: '', chatCompletionsEnabled: false };
+    return { apiUrl: 'http://127.0.0.1:18789/v1', port: 18789, token: '', chatCompletionsEnabled: false };
   }
+}
+
+async function getOpenClawRunTelemetry(gateway, runId) {
+  if (!runId) return null;
+  let endpoint;
+  try {
+    endpoint = new URL('/plugins/netclaw/telemetry/run', gateway.apiUrl).toString();
+  } catch {
+    return null;
+  }
+
+  // The response is returned after the transcript write, but the bounded
+  // retries tolerate storage visibility jitter without delaying normal chat.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${gateway.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ runId }),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (response.ok) return await response.json();
+      if (response.status !== 404) return null;
+    } catch {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
 }
 
 app.post('/api/chat', async (req, res) => {
@@ -1286,7 +1482,44 @@ app.post('/api/chat', async (req, res) => {
 
   const timestamp = new Date().toISOString();
   const historyText = userMessage || '[attachment]';
+  // Keep the customer-authorized, original chat payload on the span. Galileo
+  // and Splunk receive this through the shared OTel collector without a
+  // redaction processor in this lab deployment.
+  const chatSpan = telemetryTracer.startSpan('netclaw.chat');
+  applySpanAttributes(chatSpan, buildChatStartAttributes({
+    messages,
+    userMessage,
+    timestamp,
+  }));
   chatHistory.push({ role: 'user', text: historyText, timestamp });
+
+  // Evaluate the complete original request before it reaches BridgeIT/OpenClaw.
+  // The only enabled enterprise control initially is prompt-injection defense;
+  // later controls attached to this Galileo Log Stream take effect without a
+  // NetClaw deployment.
+  try {
+    const preEvaluation = await evaluateAgentControl({
+      stage: 'pre',
+      input: messages || { message: userMessage },
+    });
+    recordAgentControlEvaluation(chatSpan, 'pre', preEvaluation);
+    if (preEvaluation && !preEvaluation.is_safe) {
+      chatSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'Blocked by Galileo Agent Control' });
+      chatSpan.end();
+      return res.status(403).json({
+        error: 'Request blocked by Galileo Agent Control.',
+        timestamp,
+      });
+    }
+  } catch (error) {
+    chatSpan.setAttribute('netclaw.agent_control.pre.error', true);
+    chatSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'Galileo Agent Control unavailable' });
+    chatSpan.end();
+    return res.status(503).json({
+      error: 'Galileo Agent Control is unavailable; the request was not sent to NetClaw.',
+      timestamp,
+    });
+  }
 
   // Analyze the message to determine which integrations/skills are relevant
   const graph = buildGraph();
@@ -1302,6 +1535,11 @@ app.post('/api/chat', async (req, res) => {
   // Try to proxy through the real OpenClaw gateway with streaming
   let responseText = '';
   let fromGateway = false;
+  let gatewayResponse = null;
+  let gatewayResponseBody = '';
+  let openClawTelemetry = null;
+  let gatewayStatusCode;
+  let gatewayDurationMs;
   const gw = getGatewayConfig();
   let gatewayFallback = gw.chatCompletionsEnabled
     ? 'OpenClaw gateway could not complete the chat request. Check the gateway terminal for details.'
@@ -1309,35 +1547,45 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     if (!gw.chatCompletionsEnabled) throw new Error('chat-completions-disabled');
-    const gwRes = await fetch(`http://127.0.0.1:${gw.port}/v1/chat/completions`, {
+    const gatewayRequest = {
+      model: 'openclaw',
+      // Existing clients keep the shared linear history. Compatibility
+      // clients can supply an isolated branch history, which prevents turns
+      // from sibling branches (or other browser tabs) bleeding together.
+      messages: contextMessages || chatHistory
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .slice(-10)
+        .map((m) => ({ role: m.role, content: m.text || m.response || '' })),
+      stream: false,
+    };
+    applySpanAttributes(chatSpan, buildGatewayRequestAttributes(gatewayRequest));
+    const gatewayStartedAt = performance.now();
+    const gwRes = await fetch(`${gw.apiUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${gw.token}`,
         'Content-Type': 'application/json',
         'x-openclaw-agent-id': 'main',
       },
-      body: JSON.stringify({
-        model: 'openclaw',
-        // Existing clients keep the shared linear history. Compatibility
-        // clients can supply an isolated branch history, which prevents turns
-        // from sibling branches (or other browser tabs) bleeding together.
-        messages: contextMessages || chatHistory
-          .filter((m) => m.role === 'user' || m.role === 'assistant')
-          .slice(-10)
-          .map((m) => ({ role: m.role, content: m.text || m.response || '' })),
-        stream: false,
-      }),
+      body: JSON.stringify(gatewayRequest),
       signal: AbortSignal.timeout(300000),
     });
+    gatewayDurationMs = performance.now() - gatewayStartedAt;
+    gatewayStatusCode = gwRes.status;
+    gatewayResponseBody = await gwRes.text();
 
     if (gwRes.ok) {
-      const gwData = await gwRes.json();
-      responseText = gwData.choices?.[0]?.message?.content || gwData.choices?.[0]?.text || '';
+      gatewayResponse = JSON.parse(gatewayResponseBody);
+      responseText = gatewayResponse.choices?.[0]?.message?.content
+        || gatewayResponse.choices?.[0]?.text
+        || '';
       fromGateway = true;
+      openClawTelemetry = await getOpenClawRunTelemetry(gw, gatewayResponse.id);
     } else {
       gatewayFallback = `OpenClaw rejected the chat request (HTTP ${gwRes.status}). Check the gateway terminal for details.`;
     }
   } catch (error) {
+    applySpanAttributes(chatSpan, buildGatewayErrorAttributes(error));
     if (error?.message !== 'chat-completions-disabled') {
       gatewayFallback = 'OpenClaw gateway could not complete the chat request. Check the gateway terminal for details.';
     }
@@ -1346,6 +1594,48 @@ app.post('/api/chat', async (req, res) => {
   if (!responseText) {
     responseText = buildChatResponse(historyText, activations, graph, gatewayFallback);
   }
+
+  // A post-stage deny prevents the generated content reaching the browser.
+  // It cannot undo a tool action already completed inside the upstream gateway;
+  // those require an OpenClaw tool-lifecycle integration before execution.
+  try {
+    const postEvaluation = await evaluateAgentControl({
+      stage: 'post',
+      input: messages || { message: userMessage },
+      output: responseText,
+    });
+    recordAgentControlEvaluation(chatSpan, 'post', postEvaluation);
+    if (postEvaluation && !postEvaluation.is_safe) {
+      chatSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'Response blocked by Galileo Agent Control' });
+      chatSpan.end();
+      return res.status(403).json({
+        error: 'Response blocked by Galileo Agent Control.',
+        timestamp,
+      });
+    }
+  } catch (error) {
+    chatSpan.setAttribute('netclaw.agent_control.post.error', true);
+    chatSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'Galileo Agent Control unavailable' });
+    chatSpan.end();
+    return res.status(503).json({
+      error: 'Galileo Agent Control is unavailable; the response was not sent.',
+      timestamp,
+    });
+  }
+
+  applySpanAttributes(chatSpan, buildChatCompletionAttributes({
+    responseText,
+    gatewayResponse,
+    gatewayResponseBody,
+    gatewayStatusCode,
+    gatewayDurationMs,
+    fromGateway,
+    openClawTelemetry,
+  }));
+  chatSpan.setStatus(fromGateway
+    ? { code: SpanStatusCode.OK }
+    : { code: SpanStatusCode.ERROR, message: gatewayFallback });
+  chatSpan.end();
 
   chatHistory.push({ role: 'assistant', text: responseText, timestamp: new Date().toISOString() });
 
@@ -1463,7 +1753,7 @@ function extractAndBroadcastToolCalls(graph) {
 }
 
 // API endpoints for session tool calls
-app.get('/api/sessions', (req, res) => {
+app.get('/api/sessions', disabledInPublicMode, (req, res) => {
   try {
     const files = fs.readdirSync(SESSIONS_DIR)
       .filter((f) => f.endsWith('.jsonl'))
@@ -1479,7 +1769,7 @@ app.get('/api/sessions', (req, res) => {
   }
 });
 
-app.get('/api/session/:id/tools', (req, res) => {
+app.get('/api/session/:id/tools', disabledInPublicMode, (req, res) => {
   const sessionFile = path.join(SESSIONS_DIR, `${req.params.id}.jsonl`);
   if (!fs.existsSync(sessionFile)) return res.status(404).json({ error: 'Session not found' });
   const calls = extractToolCalls(sessionFile);
@@ -1694,7 +1984,7 @@ function ragStartProgressPolling() {
   }, 3000);
 }
 
-app.get('/api/rag/documents', async (req, res) => {
+app.get('/api/rag/documents', disabledInPublicMode, async (req, res) => {
   try {
     const result = await callRagTool('rag_list', {}, 60);
     if (!result.success) return res.status(500).json(result.error);
@@ -1704,7 +1994,7 @@ app.get('/api/rag/documents', async (req, res) => {
   }
 });
 
-app.get('/api/rag/stats', async (req, res) => {
+app.get('/api/rag/stats', disabledInPublicMode, async (req, res) => {
   try {
     const result = await callRagTool('rag_stats', {}, 60);
     if (!result.success) return res.status(500).json(result.error);
@@ -1725,7 +2015,7 @@ const ragUpload = multer({
   limits: { fileSize: RAG_MAX_DOC_MB * 1024 * 1024 },
 });
 
-app.post('/api/rag/upload', (req, res) => {
+app.post('/api/rag/upload', disabledInPublicMode, (req, res) => {
   ragUpload.single('file')(req, res, async (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -1784,7 +2074,7 @@ app.post('/api/rag/upload', (req, res) => {
   });
 });
 
-app.delete('/api/rag/documents/:id', async (req, res) => {
+app.delete('/api/rag/documents/:id', disabledInPublicMode, async (req, res) => {
   if (req.body?.confirm !== true) {
     return res.status(400).json({ error: 'Deletion requires {"confirm": true} (destructive operation).' });
   }
@@ -1801,7 +2091,7 @@ app.delete('/api/rag/documents/:id', async (req, res) => {
   }
 });
 
-app.post('/api/rag/documents/:id/reindex', async (req, res) => {
+app.post('/api/rag/documents/:id/reindex', disabledInPublicMode, async (req, res) => {
   if (req.body?.confirm !== true) {
     return res.status(400).json({ error: 'Re-index requires {"confirm": true}.' });
   }
@@ -1854,6 +2144,15 @@ wss.on('connection', (socket) => {
     clearInterval(timer);
   });
 });
+
+const DIST_DIR = path.join(__dirname, 'dist');
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR, { index: false }));
+  app.get(['/', '/index.html', '/canvas.html'], (request, response) => {
+    const page = request.path === '/canvas.html' ? 'canvas.html' : 'index.html';
+    response.sendFile(path.join(DIST_DIR, page));
+  });
+}
 
 const PORT = process.env.HUD_PORT || 3001;
 server.listen(PORT, () => {

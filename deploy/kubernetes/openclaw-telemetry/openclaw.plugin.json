@@ -1,0 +1,9 @@
+{
+  "id": "netclaw-telemetry",
+  "name": "NetClaw Telemetry Metadata",
+  "description": "Returns exact, content-free OpenClaw model usage metadata for an authenticated chat run.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

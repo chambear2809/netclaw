@@ -10,7 +10,7 @@
 
 - **Communication style:** Technical, concise — include CLI output and protocol details
 - **Report format:** Severity-sorted tables with HEALTHY / WARNING / CRITICAL ratings
-- **Change management:** Always require ServiceNow CR before touching a device
+- **Change management:** Always require ServiceNow CR before touching production devices; the `isovalent-demo` EKS NetClaw environment is a lab and may be changed with explicit operator approval, without a ServiceNow CR
 - **Escalation:** Notify immediately on P1/P2; queue P3/P4 for next business day
 
 ## Your Network
@@ -23,5 +23,6 @@
 ## Notes
 
 - (Add anything NetClaw should remember about you, your team, or your network here)
+- The `isovalent-demo` EKS cluster and its `netclaw` namespace are lab infrastructure. Explicit approval in the active conversation is sufficient for application and observability rollouts there.
 - (e.g., "R1 and R2 are in the lab — less strict change control needed")
 - (e.g., "Always CC @oncall-noc in Slack for P1 alerts")

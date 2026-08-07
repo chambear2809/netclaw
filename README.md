@@ -2480,7 +2480,9 @@ netclaw/
 │   │   ├── catalog.sh                    # Component catalog + install profiles
 │   │   └── install-steps.sh              # One install function per component (72)
 │   ├── mcp-call.py                       # MCP JSON-RPC protocol handler
-│   └── gait-stdio.py                     # GAIT server stdio wrapper
+│   ├── gait-stdio.py                     # GAIT server stdio wrapper
+│   ├── gait-venv-setup.sh                # Rebuild isolated GAIT runtime
+│   └── pyats-venv-setup.sh               # Rebuild isolated Python 3.13 pyATS runtime
 ├── examples/
 │   ├── 01_health_check.md
 │   ├── 02_vulnerability_audit.md
@@ -2509,6 +2511,8 @@ netclaw/
 | `mcp-servers/` | Tool backends cloned by `install.sh`. Gitignored — rebuilt on install |
 | `scripts/mcp-call.py` | Handles MCP JSON-RPC protocol: initialize, notify, tool call, terminate |
 | `scripts/gait-stdio.py` | Wraps GAIT MCP server for stdio mode (default is SSE) |
+| `scripts/gait-venv-setup.sh` | Rebuilds the pinned GAIT Python 3.13 runtime from public PyPI, independent of workstation package-index configuration |
+| `scripts/pyats-venv-setup.sh` | Rebuilds the pinned pyATS/Genie Python 3.13 runtime and upstream pyATS MCP checkout |
 
 ---
 

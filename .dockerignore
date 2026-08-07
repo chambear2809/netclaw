@@ -1,0 +1,28 @@
+.git
+.github
+.specify
+captures
+labs
+testbed
+tests
+benchmarks
+docs
+examples
+specs
+mobile
+ui
+memory
+.env
+.env.*
+*.pyc
+__pycache__
+
+# The NetClaw Visual HUD is a separately built public image. Keep the rest of
+# the UI tree excluded from the gateway image context.
+!ui/
+!ui/netclaw-visual/
+!ui/netclaw-visual/**
+!specs/
+!specs/072-hud-2-org-chart/
+!specs/072-hud-2-org-chart/fixtures/
+!specs/072-hud-2-org-chart/fixtures/**

@@ -1,0 +1,120 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789,
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}",
+      "allowTailscale": false
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    },
+    "controlUi": {
+      "allowedOrigins": ["https://netclaw.fso-tme.click"]
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
+      "model": {
+        "primary": "bridgeit/gpt-4o-mini"
+      },
+      "heartbeat": {
+        "every": "0m"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "bridgeit": {
+        "baseUrl": "http://openclaw.defenseclaw.svc.cluster.local:18789/v1",
+        "apiKey": "${BRIDGEIT_PROXY_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-4o-mini",
+            "name": "BridgeIT GPT-4o Mini",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": ["netclaw-telemetry"],
+    "load": {
+      "paths": ["/opt/netclaw/openclaw-telemetry"]
+    },
+    "entries": {
+      "netclaw-telemetry": {
+        "enabled": true
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "bgp-intel-mcp": {
+        "type": "stdio",
+        "command": "/opt/netclaw/.venv/bin/python",
+        "args": ["/opt/netclaw/mcp-servers/bgp-intel-mcp/server.py"],
+        "cwd": "/opt/netclaw/mcp-servers/bgp-intel-mcp"
+      },
+      "analysis-mcp": {
+        "type": "stdio",
+        "command": "/opt/netclaw/.venv/bin/python",
+        "args": ["/opt/netclaw/mcp-servers/analysis-mcp/server.py"],
+        "cwd": "/opt/netclaw/mcp-servers/analysis-mcp"
+      },
+      "document-mcp": {
+        "type": "stdio",
+        "command": "/opt/netclaw/.venv/bin/python",
+        "args": ["/opt/netclaw/mcp-servers/document-mcp/server.py"],
+        "cwd": "/opt/netclaw/mcp-servers/document-mcp",
+        "env": {
+          "DOCUMENT_OUTPUT_DIR": "/home/node/.openclaw/workspace/output/document-mcp"
+        }
+      },
+      "thousandeyes-official-mcp": {
+        "type": "stdio",
+        "command": "mcp-remote",
+        "args": [
+          "https://api.thousandeyes.com/mcp",
+          "--header",
+          "Authorization:Bearer ${TE_TOKEN}",
+          "--transport",
+          "http-only",
+          "--silent"
+        ],
+        "env": {
+          "MCP_REMOTE_CONFIG_DIR": "/tmp/mcp-auth"
+        }
+      },
+      "meraki-official-mcp": {
+        "type": "stdio",
+        "command": "mcp-remote",
+        "args": [
+          "https://mcp.meraki.com/mcp",
+          "--header",
+          "Authorization:Bearer ${MERAKI_DASHBOARD_API_KEY}",
+          "--transport",
+          "http-only",
+          "--silent"
+        ],
+        "env": {
+          "MCP_REMOTE_CONFIG_DIR": "/tmp/mcp-auth"
+        }
+      }
+    }
+  }
+}

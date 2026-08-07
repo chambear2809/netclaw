@@ -133,7 +133,11 @@ def main():
                 "clientInfo": {"name": "netclaw", "version": "1.0"},
             },
         })
-        init_resp = recv(proc, timeout=10, expected_id=0)
+        # Heavy MCPs such as pyATS/Genie can spend 20+ seconds importing their
+        # parser catalog on a cold start. Keep the timeout configurable and do
+        # not kill a healthy server at the previous hard-coded ten seconds.
+        init_timeout = float(os.environ.get("MCP_INIT_TIMEOUT", "60"))
+        init_resp = recv(proc, timeout=init_timeout, expected_id=0)
         if not init_resp:
             stderr_output = read_stderr(proc)
             if stderr_output:
