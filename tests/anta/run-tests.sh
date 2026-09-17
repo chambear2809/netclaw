@@ -11,7 +11,7 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER_DIR="$REPO_ROOT/mcp-servers/anta-mcp"
-VENV_PY="$SERVER_DIR/.venv/bin/python"
+VENV_PY="${NETCLAW_PY:-$SERVER_DIR/.venv/bin/python}"
 PASS=0; FAIL=0; SKIP=0
 
 ok()   { PASS=$((PASS+1)); echo "  ok   - $1"; }

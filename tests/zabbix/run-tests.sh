@@ -20,6 +20,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 export PYTHONPATH="$REPO_ROOT/tests/zabbix:${PYTHONPATH:-}"
+export NETCLAW_ZABBIX_VENV_PY="${NETCLAW_PY:-$REPO_ROOT/mcp-servers/zabbix-mcp/.venv/bin/python}"
 
 FAILED=0
 run() {

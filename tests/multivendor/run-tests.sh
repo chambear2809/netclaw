@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VENV_PY="$REPO_ROOT/mcp-servers/multivendor-cli-mcp/.venv/bin/python"
+VENV_PY="${NETCLAW_PY:-$REPO_ROOT/mcp-servers/multivendor-cli-mcp/.venv/bin/python}"
 PASS=0
 FAIL=0
 

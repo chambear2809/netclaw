@@ -10,7 +10,10 @@ from _harness import FAILURES, check, read, repo, run, skip  # noqa: F401
 
 PINNED_BELOW_3 = ["netbox-mcp-server", "CiscoFMC-MCP-server-community",
                   "Wikipedia_MCP", "rag-mcp", "ISE_MCP"]
-VENV_PY = repo("mcp-servers", "zabbix-mcp", ".venv", "bin", "python")
+VENV_PY = os.environ.get(
+    "NETCLAW_ZABBIX_VENV_PY",
+    repo("mcp-servers", "zabbix-mcp", ".venv", "bin", "python"),
+)
 
 def _version(python_exe: str, dist: str) -> str | None:
     out = subprocess.run([python_exe, "-c",
