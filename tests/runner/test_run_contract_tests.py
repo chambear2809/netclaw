@@ -79,7 +79,16 @@ def fake_repo(with_pytest: bool = False) -> tuple[tempfile.TemporaryDirectory, P
             },
             "timeout_seconds": 5,
         }
-    manifest = {"schema_version": 1, "default_python": "3.12", "suites": suites}
+    # Declare the interpreter that is already running this test. Environment
+    # preparation is under test, not Python-version resolution: pinning a
+    # different major here would make the test depend on the host having uv or
+    # that exact interpreter, which is how it would pass in CI and fail on a
+    # developer's laptop.
+    manifest = {
+        "schema_version": 1,
+        "default_python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "suites": suites,
+    }
     manifest_path = root / "tests" / "contract-suites.json"
     manifest_path.write_text(json.dumps(manifest))
     return temp, root, manifest_path
