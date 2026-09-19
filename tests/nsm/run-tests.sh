@@ -171,6 +171,14 @@ if [ "$HAVE_MCP" != "1" ]; then
 elif ! docker info >/dev/null 2>&1; then
     skip "Zeek/Suricata analysis (docker not reachable)"
     skip "checksum trap reproduction (docker not reachable)"
+elif ! docker image inspect \
+        "zeek/zeek@sha256:eca2b3915d3e067cbb4a904f23f4c4f461ea2b60613ab30f7ee77bbc707c87c7" \
+        >/dev/null 2>&1 || \
+     ! docker image inspect \
+        "jasonish/suricata@sha256:81468a22f0b685f3d7e0c1646ab4fdb9a67c1b3dfa3357c52b1434dd4f39dc49" \
+        >/dev/null 2>&1; then
+    skip "Zeek/Suricata analysis (pinned docker images unavailable)"
+    skip "checksum trap reproduction (pinned docker images unavailable)"
 else
     # The trap, reproduced end to end: Zeek's own default hides the HTTP transaction.
     out="$(cd "$SRV" && python3 -c "

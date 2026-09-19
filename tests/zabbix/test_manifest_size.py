@@ -13,7 +13,10 @@ from _harness import FAILURES, check, repo, run, skip  # noqa: F401
 
 CEILING = 5000
 EXPECTED_TOOLS = {"zabbix_api", "zabbix_api_docs", "zabbix_api_list"}
-VENV_PY = repo("mcp-servers", "zabbix-mcp", ".venv", "bin", "python")
+VENV_PY = os.environ.get(
+    "NETCLAW_ZABBIX_VENV_PY",
+    repo("mcp-servers", "zabbix-mcp", ".venv", "bin", "python"),
+)
 
 PROBE = r'''
 import asyncio, json, os, sys
