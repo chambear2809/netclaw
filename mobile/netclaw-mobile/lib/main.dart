@@ -1,28 +1,45 @@
 import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'ncfed/app_lock.dart';
 import 'ncfed/approval_client.dart';
+// ignore: unused_import
+import 'ncfed/ask_border_headless.dart';
+import 'ncfed/background_refresh.dart';
+// ignore: unused_import
+import 'ncfed/border_health_headless.dart';
 import 'ncfed/badge_lifecycle.dart';
 import 'ncfed/capability_registration.dart';
 import 'ncfed/capture_client.dart';
 import 'ncfed/conversation_store.dart';
 import 'ncfed/dashboard_data.dart';
 import 'ncfed/device_deep_link.dart';
+import 'ncfed/device_heartbeat.dart';
 import 'ncfed/edge_ask_client.dart';
 import 'ncfed/edge_client.dart';
 import 'ncfed/edge_identity.dart';
+import 'ncfed/enrollment_qr_payload.dart';
 import 'ncfed/enrollment_store.dart';
+import 'ncfed/haptics.dart';
 import 'ncfed/heartbeat.dart';
+import 'ncfed/ask_live_activity.dart';
 import 'ncfed/live_activity.dart';
+import 'ncfed/widget_data.dart';
 import 'ncfed/local_notifications.dart';
 import 'ncfed/message_feed.dart';
 import 'ncfed/notification_deep_link.dart';
+import 'ncfed/pending_approval_store.dart';
+// ignore: unused_import
+import 'ncfed/pending_approvals_headless.dart';
+import 'ncfed/push_message_ingest.dart';
 import 'ncfed/push_registration.dart';
 import 'ncfed/reconnect_supervisor.dart';
+import 'ncfed/theme_preference.dart';
 import 'ncfed/turn_reconciler.dart';
 import 'ncfed/watch_relay.dart';
 import 'screens/approvals_screen.dart';
@@ -32,24 +49,184 @@ import 'screens/dashboard_screen.dart';
 import 'screens/device_scan_screen.dart';
 import 'screens/enrollment_screen.dart';
 import 'screens/feed_screen.dart';
+import 'screens/onboarding_explainer_screen.dart';
 import 'screens/settings_screen.dart';
+import 'theme.dart';
 
-void main() {
+/// Referenced only so [backgroundRefreshMain] (103/US3) stays part of the
+/// compiled program's import graph -- native code invokes it by name via a
+/// headless `FlutterEngine.run(withEntrypoint:)` when iOS grants a
+/// `BGAppRefreshTask` window, never through a Dart call site. See
+/// ncfed/background_refresh.dart.
+final backgroundRefreshEntryPointKeepAlive = backgroundRefreshMain;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  NetClawMobileApp.themeMode.value = await ThemePreference().load();
   runApp(const NetClawMobileApp());
 }
 
+/// 115/FR-008-FR-010: [themeMode] is the single app-wide source of truth for
+/// the operator's Light/Dark/System choice. A static `ValueNotifier` (rather
+/// than threading a constructor parameter through every intermediate widget
+/// down to the Settings screen) since this app has no existing
+/// Provider/Riverpod/Bloc dependency to build on (research.md R6) -- loaded
+/// once from [ThemePreference] before the first frame (so there's no flash
+/// of the wrong appearance), and updated directly by the Settings screen so
+/// the whole app re-themes immediately, with no restart needed.
 class NetClawMobileApp extends StatelessWidget {
+  static final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
+
   const NetClawMobileApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'NetClaw Mobile',
-      // The claw mark's own orange (assets/icon/icon.png) — matches the
-      // brand, not an arbitrary Material default.
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFE65733))),
-      home: const EnrollmentGate(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeMode,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'NetClaw Mobile',
+        debugShowCheckedModeBanner: false,
+        theme: netclawTheme,
+        darkTheme: netclawDarkTheme,
+        themeMode: mode,
+        home: AppLockGate(child: EnrollmentGate()),
+      ),
     );
+  }
+}
+
+enum _LockState { loading, locked, covered, unlocked }
+
+/// 109/US4: gates ALL app content (both the enrollment flow and the
+/// enrolled HomeShell) behind Face ID when the operator has turned the
+/// Settings toggle on. A no-op wrapper when the preference is off/unset --
+/// which every existing test and every device that never opts in continues
+/// to see (FR-008's first acceptance scenario).
+class AppLockGate extends StatefulWidget {
+  final Widget child;
+
+  /// Injectable so tests never touch the real secure-storage platform
+  /// channel (109/research.md R4).
+  final AppLockPreference? appLockPreference;
+
+  /// Injectable so tests never touch the real biometric platform channel —
+  /// mirrors `approval_confirmation.dart`'s own `authenticate` parameter.
+  final Future<bool> Function(String reason)? authenticate;
+
+  const AppLockGate({super.key, required this.child, this.appLockPreference, this.authenticate});
+
+  @override
+  State<AppLockGate> createState() => _AppLockGateState();
+}
+
+class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
+  late final AppLockPreference _pref = widget.appLockPreference ?? AppLockPreference();
+  _LockState _state = _LockState.loading;
+  bool _enabled = false;
+  Duration _gracePeriod = defaultGracePeriod;
+  // Volatile, deliberately never persisted (data-model.md) -- a killed and
+  // relaunched process is always a cold start, which already requires auth
+  // regardless of any grace period.
+  DateTime? _lastForegroundedAt;
+  bool _authenticating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final enabled = await _pref.isEnabled();
+    final gracePeriod = await _pref.gracePeriod();
+    if (!mounted) return;
+    setState(() {
+      _enabled = enabled;
+      _gracePeriod = gracePeriod;
+      _state = enabled ? _LockState.locked : _LockState.unlocked;
+    });
+    if (enabled) _attemptUnlock();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_enabled) return;
+    switch (state) {
+      // FR-009's own gotcha: cover content BEFORE backgrounding (inactive
+      // fires first, ahead of the OS app-switcher snapshot), not after.
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        if (mounted && _state == _LockState.unlocked) {
+          setState(() => _state = _LockState.covered);
+        }
+      case AppLifecycleState.resumed:
+        if (_state == _LockState.covered) {
+          if (requiresReauth(
+              now: DateTime.now(), lastForegroundedAt: _lastForegroundedAt, gracePeriod: _gracePeriod)) {
+            setState(() => _state = _LockState.locked);
+            _attemptUnlock();
+          } else {
+            // Within the grace period -- no re-prompt (FR-009), and this
+            // counts as fresh presence, so the window effectively renews.
+            _lastForegroundedAt = DateTime.now();
+            setState(() => _state = _LockState.unlocked);
+          }
+        }
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  Future<void> _attemptUnlock() async {
+    if (_authenticating) return; // FR-010: never a second concurrent prompt
+    _authenticating = true;
+    final ok = await authenticateForAppLock('Unlock NetClaw', authenticate: widget.authenticate);
+    _authenticating = false;
+    if (!mounted) return;
+    if (ok) {
+      _lastForegroundedAt = DateTime.now();
+      setState(() => _state = _LockState.unlocked);
+    }
+    // Failed/cancelled: FR-009's Acceptance Scenario 6 -- the lock screen
+    // remains, no app content is ever exposed. The operator can retry via
+    // the lock screen's own button (below).
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    switch (_state) {
+      case _LockState.loading:
+        return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      case _LockState.locked:
+        return Scaffold(
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.lock_outline, size: 48),
+                const SizedBox(height: 16),
+                const Text('NetClaw is locked'),
+                const SizedBox(height: 16),
+                ElevatedButton(onPressed: _attemptUnlock, child: const Text('Unlock')),
+              ],
+            ),
+          ),
+        );
+      case _LockState.covered:
+        // Deliberately blank -- this is what the OS app-switcher snapshot
+        // captures, so it must not leak any app content (FR-009's gotcha).
+        return const Scaffold(body: SizedBox.expand());
+      case _LockState.unlocked:
+        return widget.child;
+    }
   }
 }
 
@@ -64,7 +241,27 @@ class EnrollmentGate extends StatefulWidget {
   /// injectable-function-with-production-default pattern).
   final Future<Directory> Function() documentsDirectory;
 
-  const EnrollmentGate({super.key, this.documentsDirectory = getApplicationDocumentsDirectory});
+  /// Injectable for the same reason (105/FR-002 test coverage) — a test
+  /// exercising the "already enrolled" branch must never let a real
+  /// `EdgeClient.reconnect()` attempt an actual network connection, which
+  /// would leak a live async operation past the test's own lifetime.
+  final Future<EdgeClient> Function(
+    EnrollmentQrPayload payload, {
+    required String memberId,
+    required String keyFingerprint,
+    required EdgeIdentity identity,
+  }) reconnect;
+
+  /// Injectable so tests never touch the real haptic platform channel
+  /// (109/research.md R4).
+  final Haptics haptics;
+
+  EnrollmentGate({
+    super.key,
+    this.documentsDirectory = getApplicationDocumentsDirectory,
+    this.reconnect = EdgeClient.reconnect,
+    Haptics? haptics,
+  }) : haptics = haptics ?? Haptics();
 
   @override
   State<EnrollmentGate> createState() => _EnrollmentGateState();
@@ -77,6 +274,12 @@ class _EnrollmentGateState extends State<EnrollmentGate> {
   final String _newMemberId = 'risk/${DateTime.now().millisecondsSinceEpoch}';
   EnrollmentStore? _store;
   _GateState _state = _GateState.loading;
+  // 105/US1: NOT persisted -- deliberately an "unenrolled-state" screen, not
+  // a "seen once, never again" one (spec.md's own edge case). Resets to
+  // false on every fresh launch/widget construction; only survives within
+  // this same running session so re-showing it after e.g. cancelling out of
+  // the QR scanner doesn't happen without a full relaunch.
+  bool _explainerDismissed = false;
 
   @override
   void initState() {
@@ -96,7 +299,7 @@ class _EnrollmentGateState extends State<EnrollmentGate> {
     }
     setState(() => _state = _GateState.reconnecting);
     try {
-      final client = await EdgeClient.reconnect(
+      final client = await widget.reconnect(
         stored.toPayload(),
         memberId: stored.memberId,
         keyFingerprint: stored.keyFingerprint,
@@ -122,6 +325,11 @@ class _EnrollmentGateState extends State<EnrollmentGate> {
   @override
   Widget build(BuildContext context) {
     if (_state == _GateState.needsEnrollment) {
+      if (!_explainerDismissed) {
+        return OnboardingExplainerScreen(
+          onContinue: () => setState(() => _explainerDismissed = true),
+        );
+      }
       return EnrollmentScreen(
         memberId: _newMemberId,
         identity: _identity,
@@ -140,6 +348,7 @@ class _EnrollmentGateState extends State<EnrollmentGate> {
             await _store!.save(stored);
           }
           if (!mounted) return;
+          widget.haptics.enrollmentSucceeded();
           navigator.pushReplacement(
             MaterialPageRoute(builder: (_) => HomeShell(client: client, stored: stored)),
           );
@@ -226,6 +435,16 @@ class _HomeShellState extends State<HomeShell> {
       final askClient = EdgeAskClient(widget.client);
       final conversationStore = ConversationStore(dir);
       final approvalClient = ApprovalClient(widget.client);
+      // 103/US3: an approval may have arrived and been ACKed to the Border
+      // during a headless BGAppRefreshTask window, where no live
+      // ApprovalClient existed to hold it in memory -- PendingApprovalStore
+      // is the durable holding pen for exactly that case. Drained once, here,
+      // before anything else might reasonably act on approvals.
+      PendingApprovalStore(dir).loadAndClear().then((pending) {
+        for (final params in pending) {
+          approvalClient.receiveApproval(params);
+        }
+      });
       final capabilities = CapabilityRegistration(widget.client);
       // 099/FR-017/FR-018: reacts to the SAME `currentPending` stream
       // regardless of which surface changed it -- in-app buttons,
@@ -234,69 +453,54 @@ class _HomeShellState extends State<HomeShell> {
       // so the Live Activity starts/ends correctly no matter which one
       // acted. Aggregate, not per-approval: shows the first pending one.
       final liveActivity = LiveActivity();
+      // 113/US2/FR-003: whatever approval id(s) drop out of the pending set
+      // between one emission and the next were resolved (through ANY
+      // surface -- in-app, notification, or watch) -- tell the activity so
+      // it reflects that and dismisses, instead of only ever calling the
+      // blunt `end()` when the whole list happens to empty out.
+      var previousPendingIds = <int>{};
       approvalClient.pending.listen((pending) {
+        final currentIds = pending.map((p) => p.approvalId).toSet();
+        for (final resolvedId in previousPendingIds.difference(currentIds)) {
+          liveActivity.update(approvalId: resolvedId, status: 'resolved');
+        }
+        previousPendingIds = currentIds;
+        mirrorPendingCount(pending.length); // 114/FR-001
         if (pending.isNotEmpty) {
           liveActivity.start(approvalId: pending.first.approvalId, targetName: pending.first.targetName);
         } else {
           liveActivity.end();
         }
       });
+      // 113/US3: the in-flight query Live Activity's full lifecycle, wired
+      // here (not inside chat_screen.dart) for the same reason the approval
+      // listener above is -- it must keep working while Chat isn't mounted.
+      wireAskLiveActivity(store: conversationStore, askClient: askClient, liveActivity: liveActivity);
 
       // 073: real local notifications while the app process is alive,
       // distinct from feature 066's credential-blocked remote FCM/APNs path
-      // below (_tryRegisterPush). Initialized before wireMessageFeed/
-      // conversationStore.onCompleted/receiveApproval are wired below, so
-      // the very first arrival is never missed.
+      // below (_tryRegisterPush). Constructed (not yet initialize()'d) before
+      // wireMessageFeed/wireHeartbeat/CaptureClient below, which only need the
+      // object to exist -- see the race-window note on that block.
       final localNotifications = LocalNotifications();
-      final notificationDeepLink = NotificationDeepLink(
-        store: feedStore,
-        conversationStore: conversationStore,
-        openMessage: (message) {
-          if (!mounted) return;
-          setState(() {
-            _tab = 2; // Feed (099/FR-012: shifted by Dashboard at index 0)
-            _highlightPushedAt = message.pushedAt;
-          });
-        },
-        openChatTurn: (turn) {
-          if (!mounted) return;
-          setState(() {
-            _tab = 1; // Chat (099/FR-012: shifted by Dashboard at index 0)
-            _highlightTaskId = turn.taskId;
-          });
-        },
-      );
-      await localNotifications.initialize(
-        onResponse: (response) => handleNotificationResponse(
-          response,
-          approvalClient: approvalClient,
-          deepLink: notificationDeepLink,
-        ),
-      );
-      final permissionGranted = await localNotifications.requestPermission();
-      if (mounted) {
-        setState(() {
-          _localNotifications = localNotifications;
-          _notificationDeepLink = notificationDeepLink;
-          _localNotificationsPermissionDenied = !permissionGranted;
-        });
-      }
 
-      conversationStore.onCompleted = (turn) {
-        if (!mounted) return;
-        if (_tab != 1) { // Chat (099/FR-012: shifted by Dashboard at index 0)
-          localNotifications.postChatNotification(
-            identifier: turn.taskId,
-            preview: turn.answerText ?? 'Answer ready.',
-            badgeCount: combinedBadgeCount(
-              unreadFeed: feedStore.unreadCount,
-              unreadChat: conversationStore.unreadCount,
-            ),
-          );
-        }
-        _recomputeBadge();
-      };
-
+      // 103/BORDER-FINDINGS: `_listen()` starts dispatching inbound
+      // Border-initiated calls (n2n/edge/message, n2n/edge/heartbeat, capture
+      // requests) the instant `widget.client` connects -- which already
+      // happened, at latest, when `EnrollmentGate` handed us this client.
+      // `EdgeClient._onMessage` silently drops any call with no registered
+      // handler (no error reply), so the Border-side caller just times out
+      // with no client-visible symptom. A live Border trace caught exactly
+      // this: a queued-replay push arrived 86ms after a fresh handshake and
+      // got no reply for the full 30s timeout, on a connection that had only
+      // just been authenticated -- not a suspended/backgrounded app. The
+      // previous code registered these handlers only after `await
+      // localNotifications.initialize()` and `await
+      // localNotifications.requestPermission()` below, the second of which
+      // can block on a real user-facing permission dialog and so is
+      // effectively unbounded. Moved up here, before either await, so the
+      // race window shrinks to the sub-millisecond gap between this line and
+      // the object constructions just above it.
       wireMessageFeed(
         widget.client,
         feedStore,
@@ -314,6 +518,24 @@ class _HomeShellState extends State<HomeShell> {
           }
         },
         onMessage: (message) {
+          // 103/US4: persisted regardless of `mounted` -- this durable-store
+          // write is what the watch relay reads from, not a UI update, and
+          // must not be skipped just because the app happens to be
+          // backgrounded when a heartbeat lands.
+          if (looksLikeDeviceHeartbeat(message)) {
+            final status = DeviceHeartbeatStatus.fromMessage(message);
+            DeviceHeartbeatStore(dir).save(status);
+            mirrorHealth(status); // 114/FR-001
+          }
+          // Spec 107/US1: the feed just gained a message, so a notification tap
+          // still waiting for one may now be satisfiable. This is the signal that
+          // makes the pending-intent approach work without polling — replay lands
+          // seconds after a cold-start tap, and this is where that arrival is
+          // already observed. Late-bound through the field on purpose:
+          // `wireMessageFeed` is deliberately registered before the deep link is
+          // constructed (see the race comment above), so this must not capture a
+          // local that does not exist yet.
+          _notificationDeepLink?.messageArrived();
           if (!mounted) return;
           // Don't badge the tab the operator is already looking at.
           if (_tab != 2) { // Feed (099/FR-012: shifted by Dashboard at index 0)
@@ -347,12 +569,72 @@ class _HomeShellState extends State<HomeShell> {
           approvalClient: approvalClient,
           askClient: askClient,
           feedStore: feedStore,
-          conversationStore: conversationStore);
+          conversationStore: conversationStore,
+          heartbeatStore: DeviceHeartbeatStore(dir));
       const MethodChannel('ca.automateyournetwork.netclaw/watch_relay')
           .setMethodCallHandler((call) => watchRelay.handle(
                 call.method,
                 (call.arguments as Map?)?.cast<String, dynamic>() ?? {},
               ));
+
+      final notificationDeepLink = NotificationDeepLink(
+        store: feedStore,
+        conversationStore: conversationStore,
+        openMessage: (message) {
+          if (!mounted) return;
+          setState(() {
+            _tab = 2; // Feed (099/FR-012: shifted by Dashboard at index 0)
+            _highlightPushedAt = message.pushedAt;
+          });
+        },
+        openChatTurn: (turn) {
+          if (!mounted) return;
+          setState(() {
+            _tab = 1; // Chat (099/FR-012: shifted by Dashboard at index 0)
+            _highlightTaskId = turn.taskId;
+          });
+        },
+        // Spec 107/FR-003: the tapped message never turned up within the bound.
+        // Land the operator on the Feed rather than leaving them wherever the app
+        // happened to open — they tapped a notification about a message, so the
+        // feed is the least surprising place to be, and spec 106 means the
+        // message will appear there whenever it does arrive.
+        onOpenTimedOut: () {
+          if (!mounted) return;
+          setState(() => _tab = 2); // Feed
+        },
+      );
+      await localNotifications.initialize(
+        onResponse: (response) => handleNotificationResponse(
+          response,
+          approvalClient: approvalClient,
+          deepLink: notificationDeepLink,
+        ),
+      );
+      final permissionGranted = await localNotifications.requestPermission();
+      if (mounted) {
+        setState(() {
+          _localNotifications = localNotifications;
+          _notificationDeepLink = notificationDeepLink;
+          _localNotificationsPermissionDenied = !permissionGranted;
+        });
+      }
+
+      conversationStore.onCompleted = (turn) {
+        if (!mounted) return;
+        if (_tab != 1) { // Chat (099/FR-012: shifted by Dashboard at index 0)
+          localNotifications.postChatNotification(
+            identifier: turn.taskId,
+            preview: turn.answerText ?? 'Answer ready.',
+            badgeCount: combinedBadgeCount(
+              unreadFeed: feedStore.unreadCount,
+              unreadChat: conversationStore.unreadCount,
+            ),
+          );
+        }
+        _recomputeBadge();
+      };
+
       await capabilities.register();
       setState(() {
         _feedStore = feedStore;
@@ -368,6 +650,33 @@ class _HomeShellState extends State<HomeShell> {
         onSubmitted: (taskId, text) async {
           await conversationStore.addPending(taskId, text);
           if (mounted) setState(() => _tab = 1); // Chat (099/FR-012: shifted by Dashboard at index 0)
+        },
+        // 113/FR-001: the pending-approval Live Activity's Approve/Deny
+        // buttons open this exact link (research.md R2) -- foregrounds to
+        // Approvals only, never resolves anything itself.
+        onOpenApprovals: () {
+          if (mounted) _selectTab(3);
+        },
+        // 113/FR-008: the in-flight query Live Activity's tap target
+        // (research.md R3) -- mirrors NotificationDeepLink's own
+        // openChatTurn wiring above exactly.
+        onOpenChatTask: (taskId) {
+          if (!mounted) return;
+          final turn = findTurnForIdentifier(conversationStore.turns, taskId);
+          if (turn == null) return;
+          setState(() {
+            _tab = 1; // Chat (099/FR-012: shifted by Dashboard at index 0)
+            _highlightTaskId = turn.taskId;
+          });
+        },
+        // 114/US2: a health-related widget tap (research.md R3).
+        onOpenDashboard: () {
+          if (mounted) _selectTab(0);
+        },
+        // 114/US3: the Control Center control's tap target (research.md
+        // R2) -- opens Chat with no specific turn highlighted.
+        onOpenChat: () {
+          if (mounted) _selectTab(1);
         },
       );
       _deepLinkListener!.start();
@@ -395,6 +704,7 @@ class _HomeShellState extends State<HomeShell> {
         unreadChat: conversationStore.unreadCount,
       ),
     );
+    mirrorUnreadCount(feedStore.unreadCount); // 114/FR-001
   }
 
   /// Auto-redials on a dropped connection (068 polish, ports 066's
@@ -412,6 +722,7 @@ class _HomeShellState extends State<HomeShell> {
         keyFingerprint: stored.keyFingerprint,
       ),
       onConnected: (_) {
+        debugPrint('[edge-diag] reconnected ${DateTime.now().toIso8601String()}');
         if (mounted) setState(() => _connected = true);
         // A reconnect is the moment to collect anything that finished while we
         // were away: `ask_result` is best-effort and is simply not sent when no
@@ -426,6 +737,7 @@ class _HomeShellState extends State<HomeShell> {
       initiallyConnected: true,
     );
     widget.client.onDisconnected = () {
+      debugPrint('[edge-diag] disconnected ${DateTime.now().toIso8601String()}');
       supervisor.notifyDisconnected();
       if (mounted) setState(() => _connected = false);
     };
@@ -453,6 +765,7 @@ class _HomeShellState extends State<HomeShell> {
       status = await PushRegistration(widget.client).registerCurrentToken();
       if (status == PushStatus.registered) {
         await _wireNotificationDeepLink();
+        _wireForegroundPushIngest();
       }
     } catch (e, stack) {
       status = classifyPushError(e);
@@ -481,6 +794,44 @@ class _HomeShellState extends State<HomeShell> {
     await _notificationDeepLink?.wire();
   }
 
+  /// Spec 107/US2: record a pushed message straight from its payload, so it is
+  /// readable without waiting for — or even having — a live channel.
+  ///
+  /// The sender has always included the full content beside the banner; nothing
+  /// consumed it until now, which is why a push to a disconnected device drew a
+  /// notification and left the feed empty.
+  ///
+  /// Safe only because [MessageFeedStore.append] deduplicates: this message will
+  /// also arrive over the live channel when the Border replays it, and without
+  /// dedup the operator would see two of everything.
+  ///
+  /// Foreground only, deliberately. Background execution for a data-carrying push
+  /// is at the OS's discretion on both platforms, so treating it as a delivery
+  /// guarantee would reintroduce the silent-loss class spec 106 removed. Spec 106's
+  /// queue-and-replay stays the guarantee; this is an acceleration of it, and a
+  /// push that arrives while backgrounded still lands in the feed via replay.
+  void _wireForegroundPushIngest() {
+    final store = _feedStore;
+    if (store == null) return;
+    FirebaseMessaging.onMessage.listen((remote) async {
+      final outcome = await ingestPushPayload(
+        remote.data,
+        store: store,
+        onApproval: (params) => _approvalClient?.receiveApproval(params),
+        onMessage: (_) {
+          _notificationDeepLink?.messageArrived();
+          if (!mounted) return;
+          if (_tab != 2) setState(() => _unreadFeed++);
+          _recomputeBadge();
+        },
+      );
+      if (outcome == PushIngestOutcome.rejected) {
+        // Not fatal: the Border still replays it over the live channel.
+        debugPrint('push payload not usable; awaiting replay instead');
+      }
+    });
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(_badgeLifecycleObserver);
@@ -489,6 +840,23 @@ class _HomeShellState extends State<HomeShell> {
     _approvalClient?.dispose();
     super.dispose();
   }
+
+  /// The single tab-switch-plus-mark-read implementation, shared by the
+  /// bottom navigation AND the Dashboard's Unread/Pending tap-through
+  /// (109/US7, research.md R7) -- one place, so both callers agree on what
+  /// "opening Feed" means by construction, not by two implementations kept
+  /// in sync by hand.
+  void _selectTab(int index) => setState(() {
+        _tab = index;
+        // Opening the Feed is what marks it read; clear the badge and the
+        // one-shot notification highlight together. Indices shifted by one
+        // (099/FR-012) now that Dashboard occupies index 0.
+        if (index == 2) {
+          _unreadFeed = 0;
+          _highlightPushedAt = null;
+        }
+        if (index == 1) _highlightTaskId = null;
+      });
 
   Future<void> _scanDevice() async {
     if (_askClient == null || _conversationStore == null) return;
@@ -524,6 +892,9 @@ class _HomeShellState extends State<HomeShell> {
           conversationStore: _conversationStore,
           approvalClient: _approvalClient,
         ),
+        onOpenFeed: () => _selectTab(2),
+        onOpenChat: () => _selectTab(1),
+        onOpenApprovals: () => _selectTab(3),
       ),
       ChatScreen(
         askClient: _askClient!,
@@ -541,6 +912,7 @@ class _HomeShellState extends State<HomeShell> {
         capabilities: _capabilities!,
         pushStatus: _pushStatus,
         localNotificationsPermissionDenied: _localNotificationsPermissionDenied,
+        onRemoveDevice: _handleRemoveDevice,
       ),
     ];
     return Scaffold(
@@ -570,17 +942,7 @@ class _HomeShellState extends State<HomeShell> {
       body: IndexedStack(index: _tab, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() {
-          _tab = i;
-          // Opening the Feed is what marks it read; clear the badge and the
-          // one-shot notification highlight together. Indices shifted by one
-          // (099/FR-012) now that Dashboard occupies index 0.
-          if (i == 2) {
-            _unreadFeed = 0;
-            _highlightPushedAt = null;
-          }
-          if (i == 1) _highlightTaskId = null;
-        }),
+        onDestinationSelected: _selectTab,
         destinations: [
           const NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'Dashboard'),
           const NavigationDestination(icon: Icon(Icons.chat), label: 'Chat'),
@@ -623,12 +985,30 @@ class _HomeShellState extends State<HomeShell> {
     await EnrollmentStore(dir).clear();
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const EnrollmentGate()),
+      // 109/FR-009: re-wrapped in AppLockGate, not a bare EnrollmentGate --
+      // otherwise a device with app-lock enabled would be left unprotected
+      // for the rest of the session after a Border-initiated revocation.
+      MaterialPageRoute(builder: (_) => AppLockGate(child: EnrollmentGate())),
     );
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       content: Text('This device was removed by your Border. Enroll again to reconnect.'),
       duration: Duration(seconds: 6),
     ));
+  }
+
+  /// 105/US2/FR-005/FR-006: the operator-initiated counterpart to
+  /// `_handleRevoked` above — same clear-and-return-to-gate effect, but
+  /// triggered from Settings rather than by the Border, and entirely local
+  /// (no Border round trip of any kind, so it works even if the Border is
+  /// unreachable).
+  Future<void> _handleRemoveDevice() async {
+    final dir = await getApplicationDocumentsDirectory();
+    await EnrollmentStore(dir).clear();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      // 109/FR-009: same reasoning as _handleRevoked above.
+      MaterialPageRoute(builder: (_) => AppLockGate(child: EnrollmentGate())),
+    );
   }
 
   /// Per-tab destructive actions, behind a confirmation. Both clears are

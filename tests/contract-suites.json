@@ -1,0 +1,579 @@
+{
+  "schema_version": 1,
+  "default_python": "3.12",
+  "suites": {
+    "analysis": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/analysis/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/analysis",
+        "requirements": [
+          "mcp-servers/analysis-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "duckdb"
+        ],
+        "prepend_path": true
+      },
+      "timeout_seconds": 300
+    },
+    "anta": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/anta/run-tests.sh"
+      ],
+      "environment": {
+        "path": "mcp-servers/anta-mcp/.venv",
+        "requirements": [
+          "mcp-servers/anta-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "anta"
+        ],
+        "prepend_path": true
+      },
+      "live": {
+        "mode": "all",
+        "env": [
+          "ANTA_TEST_HOST",
+          "ANTA_USERNAME",
+          "ANTA_PASSWORD"
+        ],
+        "description": "live Arista EOS validation"
+      },
+      "timeout_seconds": 300
+    },
+    "bgp-intel": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/bgp-intel/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/bgp-intel",
+        "requirements": [
+          "mcp-servers/bgp-intel-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "httpx"
+        ],
+        "prepend_path": true
+      },
+      "timeout_seconds": 300
+    },
+    "catc": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/catc/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/catc",
+        "requirements": [
+          "mcp-servers/catc-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "httpx"
+        ],
+        "prepend_path": true
+      },
+      "live": {
+        "mode": "all",
+        "env": [
+          "CATC_TEST_HOST",
+          "CATC_TEST_USER",
+          "CATC_TEST_PASS",
+          "CATC_TEST_EMPTY_HOST"
+        ],
+        "description": "populated-versus-empty Catalyst Center validation"
+      },
+      "timeout_seconds": 300
+    },
+    "cisco-psirt": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/cisco-psirt/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/cisco-psirt",
+        "requirements": [
+          "mcp-servers/cisco-psirt-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "httpx"
+        ],
+        "prepend_path": true
+      },
+      "live": {
+        "mode": "all",
+        "env": [
+          "CISCO_CLIENT_ID",
+          "CISCO_CLIENT_SECRET"
+        ],
+        "command": [
+          "bash",
+          "tests/cisco-psirt/live-api.sh"
+        ],
+        "description": "opt-in Cisco PSIRT API verification"
+      },
+      "timeout_seconds": 300
+    },
+    "document": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/document/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/document",
+        "requirements": [
+          "mcp-servers/document-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "docx",
+          "openpyxl",
+          "pptx",
+          "fitz"
+        ],
+        "prepend_path": true
+      },
+      "timeout_seconds": 300
+    },
+    "fortinet": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/fortinet/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/fortinet",
+        "requirements": [
+          "mcp-servers/fortinet-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "httpx"
+        ],
+        "prepend_path": true
+      },
+      "live": {
+        "mode": "any_group",
+        "env_groups": [
+          [
+            "FORTIMANAGER_HOST",
+            "FORTIMANAGER_API_TOKEN"
+          ],
+          [
+            "FORTIGATE_HOST",
+            "FORTIGATE_API_TOKEN"
+          ],
+          [
+            "FORTIANALYZER_HOST",
+            "FORTIANALYZER_API_TOKEN"
+          ]
+        ],
+        "description": "one configured Fortinet appliance plane"
+      },
+      "timeout_seconds": 300
+    },
+    "globalping": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/globalping/run-tests.sh"
+      ],
+      "environment": {
+        "path": null,
+        "requirements": [],
+        "packages": [],
+        "required_imports": [],
+        "prepend_path": false
+      },
+      "live": {
+        "mode": "all",
+        "env": [
+          "GLOBALPING_TOKEN"
+        ],
+        "command": [
+          "bash",
+          "tests/globalping/live-api.sh"
+        ],
+        "description": "opt-in public measurement verification"
+      },
+      "timeout_seconds": 120
+    },
+    "k8s": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/k8s/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/k8s",
+        "requirements": [],
+        "packages": [
+          "mcp>=1.2.0,<2"
+        ],
+        "required_imports": [
+          "mcp"
+        ],
+        "prepend_path": true
+      },
+      "artifacts": [
+        {
+          "platform": "linux-x86_64",
+          "url": "https://github.com/containers/kubernetes-mcp-server/releases/download/v0.0.66/kubernetes-mcp-server-linux-amd64",
+          "destination": "mcp-servers/k8s-mcp/kubernetes-mcp-server",
+          "sha256": "692a7b283a96140311fd46f13b8373657b2e9bfe660a36bb6434e8c42d899dbc",
+          "executable": true
+        }
+      ],
+      "live": {
+        "mode": "all",
+        "env": [
+          "K8S_TEST_KUBECONFIG",
+          "K8S_TEST_LIMITED_KUBECONFIG"
+        ],
+        "description": "cluster-wide and deliberately limited kubeconfigs"
+      },
+      "timeout_seconds": 300
+    },
+    "multivendor": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/multivendor/run-tests.sh"
+      ],
+      "environment": {
+        "path": "mcp-servers/multivendor-cli-mcp/.venv",
+        "requirements": [
+          "mcp-servers/multivendor-cli-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "nornir",
+          "napalm",
+          "netmiko",
+          "jdiff"
+        ],
+        "prepend_path": false
+      },
+      "docker": {
+        "level": "service",
+        "service_url": "tcp://127.0.0.1:2222",
+        "description": "optional FRR/SR Linux integration lab"
+      },
+      "timeout_seconds": 600
+    },
+    "nsm": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/nsm/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/nsm",
+        "requirements": [
+          "mcp-servers/nsm-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp"
+        ],
+        "prepend_path": true
+      },
+      "docker": {
+        "level": "daemon",
+        "images": [
+          "zeek/zeek@sha256:eca2b3915d3e067cbb4a904f23f4c4f461ea2b60613ab30f7ee77bbc707c87c7",
+          "jasonish/suricata@sha256:81468a22f0b685f3d7e0c1646ab4fdb9a67c1b3dfa3357c52b1434dd4f39dc49"
+        ],
+        "description": "pinned Zeek and Suricata container analysis"
+      },
+      "timeout_seconds": 900
+    },
+    "reconcile": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/reconcile/run-tests.sh"
+      ],
+      "environment": {
+        "path": null,
+        "requirements": [],
+        "packages": [],
+        "required_imports": [],
+        "prepend_path": false
+      },
+      "timeout_seconds": 300
+    },
+    "redfish": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/redfish/run-tests.sh"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/redfish",
+        "requirements": [
+          "mcp-servers/redfish-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "mcp",
+          "httpx"
+        ],
+        "prepend_path": true
+      },
+      "docker": {
+        "level": "service",
+        "service_url": "http://127.0.0.1:8000/redfish/v1",
+        "description": "DMTF Redfish mock service"
+      },
+      "timeout_seconds": 300
+    },
+    "zabbix": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/zabbix/run-tests.sh"
+      ],
+      "environment": {
+        "path": "mcp-servers/zabbix-mcp/.venv",
+        "requirements": [
+          "mcp-servers/zabbix-mcp/requirements.txt"
+        ],
+        "packages": [],
+        "required_imports": [
+          "fastmcp",
+          "zabbix_utils"
+        ],
+        "prepend_path": false
+      },
+      "live": {
+        "mode": "all",
+        "env": [
+          "ZABBIX_URL",
+          "ZABBIX_TOKEN"
+        ],
+        "description": "live Zabbix history and retention traps"
+      },
+      "timeout_seconds": 300
+    },
+    "runner": {
+      "kind": "shell",
+      "command": [
+        "bash",
+        "tests/runner/run-tests.sh"
+      ],
+      "environment": {
+        "path": null,
+        "requirements": [],
+        "packages": [],
+        "required_imports": [],
+        "prepend_path": false
+      },
+      "timeout_seconds": 300
+    },
+    "contract": {
+      "kind": "pytest",
+      "paths": [
+        "tests/contract"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/contract",
+        "requirements": [],
+        "packages": [
+          "pytest>=8,<9"
+        ],
+        "required_imports": [
+          "pytest"
+        ],
+        "prepend_path": true
+      },
+      "timeout_seconds": 300
+    },
+    "unit": {
+      "kind": "pytest",
+      "paths": [
+        "tests/unit"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/unit",
+        "requirements": [],
+        "packages": [
+          "pytest>=8,<9",
+          "Pillow>=10,<12",
+          "numpy>=1.26,<3",
+          "httpx>=0.27,<1",
+          "chromadb>=0.5,<2"
+        ],
+        "required_imports": [
+          "pytest",
+          "PIL",
+          "numpy",
+          "httpx",
+          "chromadb"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "greenness unverified; its chromadb dependency has never been installed by any workflow"
+      },
+      "timeout_seconds": 900
+    },
+    "integration": {
+      "kind": "pytest",
+      "paths": [
+        "tests/integration"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/integration",
+        "requirements": [],
+        "packages": [
+          "pytest>=8,<9",
+          "httpx>=0.27,<1",
+          "playwright>=1.47,<2",
+          "PyYAML>=6,<7"
+        ],
+        "required_imports": [
+          "pytest",
+          "httpx",
+          "playwright",
+          "yaml"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "requires Playwright browser binaries, which this workflow does not install"
+      },
+      "timeout_seconds": 900
+    },
+    "n2n": {
+      "kind": "pytest",
+      "paths": [
+        "tests/n2n"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/n2n",
+        "requirements": [
+          "mcp-servers/protocol-mcp/requirements.txt"
+        ],
+        "packages": [
+          "pytest>=8,<9",
+          "cryptography>=43,<45"
+        ],
+        "required_imports": [
+          "pytest",
+          "websockets",
+          "cryptography"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "greenness unverified; no workflow has ever executed this suite"
+      },
+      "timeout_seconds": 900
+    },
+    "auvik-mcp": {
+      "kind": "pytest",
+      "paths": [
+        "tests/auvik-mcp"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/auvik-mcp",
+        "requirements": [
+          "mcp-servers/auvik-mcp/requirements.txt"
+        ],
+        "packages": [
+          "pytest>=8,<9",
+          "pytest-asyncio>=0.24,<1"
+        ],
+        "required_imports": [
+          "pytest",
+          "httpx",
+          "dotenv"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "greenness unverified; its dependency set is still being established"
+      },
+      "timeout_seconds": 600
+    },
+    "halo-mcp": {
+      "kind": "pytest",
+      "paths": [
+        "tests/halo-mcp"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/halo-mcp",
+        "requirements": [
+          "mcp-servers/halo-mcp/requirements.txt"
+        ],
+        "packages": [
+          "pytest>=8,<9",
+          "pytest-asyncio>=0.24,<1"
+        ],
+        "required_imports": [
+          "pytest",
+          "httpx",
+          "dotenv"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "greenness unverified; its dependency set is still being established"
+      },
+      "timeout_seconds": 600
+    },
+    "token-budget": {
+      "kind": "pytest",
+      "paths": [
+        "tests/test_budget_policy.py",
+        "tests/test_gcf_serializer.py",
+        "tests/test_session_budget.py"
+      ],
+      "environment": {
+        "path": ".contract-test-envs/token-budget",
+        "requirements": [],
+        "packages": [
+          "pytest>=8,<9"
+        ],
+        "required_imports": [
+          "pytest"
+        ],
+        "prepend_path": true
+      },
+      "ci": {
+        "include": false,
+        "reason": "greenness unverified; tests/test_gcf_serializer.py currently fails"
+      },
+      "timeout_seconds": 300
+    }
+  }
+}

@@ -1900,7 +1900,18 @@ if [ -d "$PROTOCOL_MCP_DIR" ]; then
     if [ -f "$PROTOCOL_MCP_DIR/requirements.txt" ]; then
         netclaw_pip_install -r "$PROTOCOL_MCP_DIR/requirements.txt" || {
             log_warn "Full Protocol MCP install failed — installing core deps..."
-            netclaw_pip_install scapy networkx mcp fastmcp || \
+            # Spec 105: websockets/qrcode/httpx/h2 belong in this fallback, not
+            # just in requirements.txt. They are the mesh daemon's own runtime
+            # deps (NCFED edge listener + enrollment QR + push), so omitting them
+            # here produced a daemon that starts, reports healthy, and cannot
+            # bind the mobile edge listener — diagnosed as a role problem.
+            #
+            # Two further corrections to this list, both from requirements.txt's
+            # own load-bearing comments: `mcp` MUST carry <2 (2.0.0 removed
+            # mcp.server.fastmcp, which this server imports, so a bare `mcp`
+            # resolves 2.x and dies at import), and `fastmcp` is deliberately NOT
+            # here — spec 077 removed it as a dead pin nothing imports.
+            netclaw_pip_install scapy networkx 'mcp>=1.0.0,<2' websockets qrcode httpx h2 || \
                 log_warn "Protocol MCP core deps install failed"
         }
     fi
@@ -1943,6 +1954,26 @@ if [ -d "$N2N_MCP_DIR" ]; then
         log_warn "n2n-mcp deps install failed — install httpx + fastmcp manually"
 else
     log_warn "n2n-mcp not found — it should be bundled at mcp-servers/n2n-mcp/"
+fi
+
+# Spec 105: N2N declares "Requires the mesh" above, and the mesh daemon IS
+# protocol-mcp/bgp-daemon-v2.py — but until now this step installed only
+# n2n-mcp's deps. Selecting N2N *without* the optional Protocol component
+# therefore produced a running mesh daemon missing its own runtime deps
+# (websockets → no NCFED edge listener, qrcode → no enrollment QR). The daemon
+# logged one ImportError and carried on; the operator-facing symptom was
+# `risk token --edge` answering "only a Border can issue enrollment tokens",
+# which points at the role rather than the missing module. That cost hours on
+# the first real-world mobile install.
+#
+# Idempotent: pip no-ops when the requirements are already satisfied, so this is
+# free when the Protocol component was selected too.
+PROTOCOL_MCP_REQS="$MCP_DIR/protocol-mcp/requirements.txt"
+if [ -f "$PROTOCOL_MCP_REQS" ]; then
+    log_info "Ensuring mesh daemon (protocol-mcp) dependencies — N2N runs on it..."
+    netclaw_pip_install -r "$PROTOCOL_MCP_REQS" || \
+        netclaw_pip_install websockets qrcode httpx h2 || \
+        log_warn "mesh daemon deps install failed — the NCFED edge listener will not bind"
 fi
 
 # Enable the federation layer in the OpenClaw .env
@@ -3602,6 +3633,103 @@ fi
 echo ""
 }
 
+# ── ComfyUI Topology Visualization: AI-generated stylized stills (spec 120) ──
+component_install_comfyui_viz() {
+log_step "Configuring ComfyUI Topology Visualization..."
+echo "  Source: https://github.com/shawnrushefsky/comfyui-mcp"
+echo "  Turns a network topology into one stylized AI-generated still image via your own"
+echo "  already-running ComfyUI instance. Requires ComfyUI to be installed and running"
+echo "  separately — this does not install or manage ComfyUI itself."
+echo "  Also installs the two NetClaw-authored MCP servers (topology-diagram-mcp,"
+echo "  image-style-mcp) spec 121's federated pipeline uses — Border's fallback tier is"
+echo "  the comfyui-mcp path above; the federated tier additionally requires a live"
+echo "  johns-risk/viz federation member (see specs/121-federated-topology-viz/quickstart.md)."
+
+read -r -p "Enable ComfyUI Topology Visualization? [y/N] " enable_comfyui_viz
+if [[ "$enable_comfyui_viz" =~ ^[Yy]$ ]]; then
+    COMFYUI_MCP_DIR="$MCP_DIR/comfyui-mcp"
+    clone_or_pull "$COMFYUI_MCP_DIR" "https://github.com/shawnrushefsky/comfyui-mcp.git"
+
+    log_info "Building ComfyUI MCP server..."
+    cd "$COMFYUI_MCP_DIR"
+    npm install 2>/dev/null || log_warn "npm install failed for ComfyUI MCP"
+    npm run build 2>/dev/null || log_warn "npm run build failed for ComfyUI MCP"
+    cd "$NETCLAW_DIR"
+
+    log_info "Installing topology-diagram-mcp and image-style-mcp dependencies (spec 121)..."
+    python3 -m pip install --user --break-system-packages -r "$MCP_DIR/topology-diagram-mcp/requirements.txt" 2>/dev/null \
+        || log_warn "pip install failed for topology-diagram-mcp"
+    python3 -m pip install --user --break-system-packages -r "$MCP_DIR/image-style-mcp/requirements.txt" 2>/dev/null \
+        || log_warn "pip install failed for image-style-mcp"
+
+    if command -v openclaw &> /dev/null; then
+        openclaw mcp set topology-diagram-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/topology-diagram-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\"}" 2>/dev/null \
+            || log_warn "openclaw mcp set failed for topology-diagram-mcp"
+        openclaw mcp set image-style-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/image-style-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\",\"env\":{\"COMFYUI_URL\":\"\${COMFYUI_URL}\"}}" 2>/dev/null \
+            || log_warn "openclaw mcp set failed for image-style-mcp"
+    fi
+
+    echo ""
+    echo "  Configure in $RUNTIME_ENV:"
+    echo "    COMFYUI_URL=http://127.0.0.1:8000   # your own ComfyUI instance's endpoint"
+    echo ""
+    echo "  If NetClaw cannot reach that URL (common when ComfyUI runs on a separate Windows"
+    echo "  host from a WSL2 NetClaw install), see specs/120-comfyui-topology-viz/quickstart.md"
+    echo "  for the WSL2 mirrored-networking check and the --listen fallback."
+    echo ""
+    echo "  For the federated (spec 121) path: grant johns-risk/viz the two new tool"
+    echo "  capabilities and confirm it's live — see"
+    echo "  specs/121-federated-topology-viz/quickstart.md. Without this the skill still"
+    echo "  works via the comfyui-mcp fallback path above."
+else
+    log_info "Skipping ComfyUI Topology Visualization — install it later with this same prompt."
+fi
+
+echo ""
+}
+
+# ── World Labs Marble: fantastical topology viz (spec 122) ───────
+component_install_worldlabs_marble() {
+log_step "Configuring World Labs Fantastical Topology Visualization..."
+echo "  Source: mcp-servers/worldlabs-marble-mcp (NetClaw-authored, spec 122)"
+echo "  Free themed preview (no cost, no credential needed) plus, after explicit"
+echo "  confirmation, an image-conditioned explorable 3D world generated via the World"
+echo "  Labs Marble API — decorative/companion only, never a substitute for the accurate"
+echo "  topology diagram it is derived from (reuses topology-diagram-mcp unmodified)."
+echo "  The generate step spends real World Labs credits (~5 minutes per world) and"
+echo "  requires a funded account: https://platform.worldlabs.ai/billing"
+
+read -r -p "Enable World Labs Fantastical Topology Visualization? [y/N] " enable_worldlabs_marble
+if [[ "$enable_worldlabs_marble" =~ ^[Yy]$ ]]; then
+    WORLDLABS_MARBLE_MCP_DIR="$MCP_DIR/worldlabs-marble-mcp"
+
+    if [ -d "$WORLDLABS_MARBLE_MCP_DIR" ]; then
+        netclaw_pip_install -r "$WORLDLABS_MARBLE_MCP_DIR/requirements.txt" 2>/dev/null || \
+            log_warn "World Labs Marble MCP dependency install failed (mcp, httpx)"
+        log_info "World Labs Marble MCP prepared: $WORLDLABS_MARBLE_MCP_DIR"
+    else
+        log_warn "World Labs Marble MCP directory missing: $WORLDLABS_MARBLE_MCP_DIR"
+    fi
+
+    if command -v openclaw &> /dev/null; then
+        openclaw mcp set worldlabs-marble-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/worldlabs-marble-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\",\"env\":{\"WLT_API_KEY\":\"\${WLT_API_KEY}\"}}" 2>/dev/null \
+            || log_warn "openclaw mcp set failed for worldlabs-marble-mcp"
+    fi
+
+    echo ""
+    echo "  Configure in $RUNTIME_ENV:"
+    echo "    WLT_API_KEY=your_worldlabs_api_key   # https://platform.worldlabs.ai/api-keys"
+    echo ""
+    echo "  Only needed for the generate step — the free preview mode needs no credential."
+    echo "  See specs/122-worldlabs-topology-viz/quickstart.md."
+    echo ""
+else
+    log_info "Skipping World Labs Fantastical Topology Visualization — install it later with this same prompt."
+fi
+
+echo ""
+}
+
 # ── Chrome DevTools MCP: headless + Watch Mode (spec 048) ───────
 component_install_chrome_devtools() {
 log_step "Configuring Chrome DevTools MCP (headless + Watch Mode)..."
@@ -4077,6 +4205,161 @@ fi
 # Worth stating at install time rather than only in the skill: the budget is charged
 # per PROBE, not per call, so `limit` is the dial that spends it.
 log_info "Budget note: cost = probe count. limit:20 spends 20 of 500 per hour."
+
+echo ""
+}
+
+component_install_topolograph() {
+log_step "Enabling Topolograph (remote MCP)..."
+echo "  OSPF/IS-IS link-state topology analysis — shortest/backup path,"
+echo "  edge/node failure simulation, MPLS-TE/CSPF, topology event timeline."
+echo "  Plus BGP topology (Topolograph >= 2.69): speakers, sessions, route"
+echo "  search, VRF/VPN inventory, BGP-to-IGP graph binding."
+echo "  Read-only: the server hides all mutation tools from tools/list."
+
+# Fronts an operator-run Topolograph HTTP API, actively developed upstream:
+# nothing to clone or pip install. "Installing" is registration plus a
+# credential check, same shape as Globalping (spec 119).
+log_info "Registered from config/openclaw.json (TOPOLOGRAPH_MCP_URL, default https://topolograph.com/mcp)"
+
+if [ -z "${TOPOLOGRAPH_API_TOKEN:-}" ]; then
+    log_info "Set TOPOLOGRAPH_API_TOKEN in .env to enable it."
+    log_info "  Issue an API token from your own Topolograph instance."
+    log_warn "The MCP endpoint returns 401 without a token."
+else
+    log_info "TOPOLOGRAPH_API_TOKEN present"
+fi
+
+# Scope the client-side surface further to the analysis tools the skill uses:
+log_info "Allowlist note: 'defenseclaw tool allow' the get_* analysis tools; leave the rest blocked."
+
+echo ""
+}
+
+# ── Step 53: Lantronix Percepxion MCP Server (OOB fleet management) ─
+component_install_percepxion() {
+log_step "Installing Lantronix Percepxion MCP Server..."
+echo "  Source: https://github.com/Lantronix/percepxion-mcp-server"
+echo "  Fleet-wide OOB console-server SaaS — device inventory, firmware compliance/rollout,"
+echo "  config mgmt, Smart Groups, security audit, async CLI dispatch (37 tools)"
+echo "  Actively co-developed by Lantronix, not a frozen third-party target — see"
+echo "  specs/104-percepxion-oob-integration/spec.md for why this is external, not vendored."
+
+PERCEPXION_MCP_DIR="$MCP_DIR/percepxion-mcp-server"
+clone_or_pull "$PERCEPXION_MCP_DIR" "https://github.com/Lantronix/percepxion-mcp-server.git"
+
+if [ -d "$PERCEPXION_MCP_DIR" ]; then
+    # DEDICATED VIRTUALENV — NOT OPTIONAL, DO NOT "SIMPLIFY" THIS AWAY.
+    # This server pins fastmcp>=3.1.0,<4.0. Five NetClaw servers pin fastmcp<3:
+    # netbox-mcp-server, CiscoFMC-MCP-server-community, Wikipedia_MCP, rag-mcp,
+    # ISE_MCP. A shared install breaks all five — the same conflict shape as
+    # component_install_zabbix() (spec 076's cryptography incident), which is
+    # why this follows Zabbix's dedicated-venv pattern instead of pyATS/JunOS's
+    # shared-interpreter pattern (neither of those pins fastmcp at all).
+    echo "  Creating a dedicated virtualenv (fastmcp 3.x conflicts with five other servers)"
+
+    if command -v netclaw_venv_create >/dev/null 2>&1; then
+        netclaw_venv_create "$PERCEPXION_MCP_DIR/.venv" || log_warn "Percepxion MCP venv creation failed"
+    elif command -v uv >/dev/null 2>&1; then
+        uv venv "$PERCEPXION_MCP_DIR/.venv" >/dev/null 2>&1 || log_warn "Percepxion MCP venv creation failed (uv)"
+    else
+        log_warn "Neither netclaw_venv_create nor uv available — cannot build the Percepxion venv."
+        log_warn "Do NOT fall back to 'python3 -m venv': ensurepip is unavailable on some hosts,"
+        log_warn "and installing into the system interpreter would break five other servers."
+    fi
+
+    if [ -x "$PERCEPXION_MCP_DIR/.venv/bin/python" ]; then
+        # Install into the VENV interpreter, named explicitly. Deliberately NOT
+        # netclaw_pip_install: that targets the system interpreter, which is the
+        # exact thing this venv exists to protect.
+        ( cd "$PERCEPXION_MCP_DIR" && \
+          uv pip install -q --python "$PERCEPXION_MCP_DIR/.venv/bin/python" -r requirements.txt ) 2>/dev/null || \
+            log_warn "Percepxion MCP dependency install failed (fastmcp, requests, python-dotenv)"
+        log_info "Percepxion MCP prepared: $PERCEPXION_MCP_DIR (isolated venv)"
+    fi
+else
+    log_warn "Percepxion MCP clone failed"
+fi
+
+# No config/openclaw.json entry — the installed path is user-specific (external/
+# on-demand classification, spec 104). Register manually per workspace/skills/
+# percepxion-oob/SKILL.md's "MCP Server" section, and set PERCEPXION_USERNAME /
+# PERCEPXION_PASSWORD (or a Vault/AWS/CyberArk provider) in .env first.
+log_info "Not auto-registered in openclaw.json — see workspace/skills/percepxion-oob/SKILL.md"
+log_info "  to register (stdio, runs from the venv above) and for required env vars."
+
+echo ""
+}
+
+# ── Step 54: Lantronix SLC MCP Server (direct OOB console access) ─
+component_install_slc() {
+log_step "Installing Lantronix SLC MCP Server..."
+echo "  Source: https://github.com/Lantronix/slc-mcp-server"
+echo "  Direct, synchronous single-device OOB console-server access — port status,"
+echo "  session mgmt, sync CLI output, cellular status (37 tools)"
+echo "  Actively co-developed by Lantronix, not a frozen third-party target — see"
+echo "  specs/104-percepxion-oob-integration/spec.md for why this is external, not vendored."
+
+SLC_MCP_DIR="$MCP_DIR/slc-mcp-server"
+clone_or_pull "$SLC_MCP_DIR" "https://github.com/Lantronix/slc-mcp-server.git"
+
+if [ -d "$SLC_MCP_DIR" ]; then
+    # DEDICATED VIRTUALENV — same fastmcp>=3.1.0,<4.0 conflict as percepxion-mcp-server
+    # above. See that function's comment for the full explanation; identical reasoning.
+    echo "  Creating a dedicated virtualenv (fastmcp 3.x conflicts with five other servers)"
+
+    if command -v netclaw_venv_create >/dev/null 2>&1; then
+        netclaw_venv_create "$SLC_MCP_DIR/.venv" || log_warn "SLC MCP venv creation failed"
+    elif command -v uv >/dev/null 2>&1; then
+        uv venv "$SLC_MCP_DIR/.venv" >/dev/null 2>&1 || log_warn "SLC MCP venv creation failed (uv)"
+    else
+        log_warn "Neither netclaw_venv_create nor uv available — cannot build the SLC venv."
+        log_warn "Do NOT fall back to 'python3 -m venv': ensurepip is unavailable on some hosts,"
+        log_warn "and installing into the system interpreter would break five other servers."
+    fi
+
+    if [ -x "$SLC_MCP_DIR/.venv/bin/python" ]; then
+        ( cd "$SLC_MCP_DIR" && \
+          uv pip install -q --python "$SLC_MCP_DIR/.venv/bin/python" -r requirements.txt ) 2>/dev/null || \
+            log_warn "SLC MCP dependency install failed (fastmcp, requests, hvac, boto3, pyotp)"
+        log_info "SLC MCP prepared: $SLC_MCP_DIR (isolated venv)"
+    fi
+else
+    log_warn "SLC MCP clone failed"
+fi
+
+# No config/openclaw.json entry — same external/on-demand classification as
+# percepxion-mcp-server above (spec 104).
+log_info "Not auto-registered in openclaw.json — see workspace/skills/percepxion-oob/SKILL.md"
+log_info "  to register (stdio, runs from the venv above) and for required env vars (SLC_{KEY}_*)."
+
+echo ""
+}
+
+# ── Zoom RTMS MCP Server (Meeting Intelligence, spec 118) ───────
+component_install_zoom_rtms() {
+log_step "Installing Zoom RTMS MCP Server..."
+echo "  Built-in MCP server: mcp-servers/zoom-rtms-mcp/"
+echo "  NetClaw for Zoom — Meeting Intelligence (spec 118): RTMS live listener,"
+echo "  investigation routing, Zoom App panel feed (9 tools)"
+
+ZOOM_RTMS_MCP_DIR="$MCP_DIR/zoom-rtms-mcp"
+if [ -d "$NETCLAW_DIR/mcp-servers/zoom-rtms-mcp" ]; then
+    ZOOM_RTMS_MCP_DIR="$NETCLAW_DIR/mcp-servers/zoom-rtms-mcp"
+fi
+
+if [ -f "$ZOOM_RTMS_MCP_DIR/requirements.txt" ]; then
+    log_info "Installing Zoom RTMS MCP dependencies..."
+    netclaw_pip_install -r "$ZOOM_RTMS_MCP_DIR/requirements.txt" || {
+            log_warn "Zoom RTMS MCP pip install failed — dependencies may need manual installation"
+        }
+    log_info "Zoom RTMS MCP ready: $ZOOM_RTMS_MCP_DIR"
+    log_info "Zoom's official RTMS SDK is not bundled — install it separately per Zoom's"
+    log_info "  distribution instructions before live meeting signals will flow (see README.md)."
+    log_info "See docs/ZOOM-MEETING-INTELLIGENCE.md for Zoom Marketplace app setup."
+else
+    log_warn "Zoom RTMS MCP requirements.txt not found at $ZOOM_RTMS_MCP_DIR"
+fi
 
 echo ""
 }

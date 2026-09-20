@@ -93,6 +93,12 @@ EXTERNAL_INTEGRATIONS = [
     "Red Hat Docs",
     "fwrule",
     "HumanRail",
+    # Spec 104: Lantronix's own actively co-developed repos, not a frozen
+    # third-party target -- vendoring would go stale on the first upstream
+    # release. git-clone + pip-install into $MCP_DIR, no config/openclaw.json
+    # entry (installed path is user-specific). See specs/104-percepxion-oob-integration/spec.md.
+    "Percepxion (Lantronix OOB fleet management)",
+    "SLC (Lantronix OOB console server, direct)",
     # Vendored under mcp-servers/ but, as of 2026-07-07, undocumented in
     # README.md's MCP Servers table entirely -- see spec 047 User Story 2.
     "IPFIX/NetFlow",
@@ -104,6 +110,11 @@ EXTERNAL_INTEGRATIONS = [
     # Installed via OpenClaw's own ClawHub skill-marketplace mechanism, not a
     # vendored mcp-servers/ clone -- see spec 050 research.md R3.
     "Computer Use",
+    # Remote/OAuth: Zoom's own hosted MCP server (historical meeting
+    # search/assets/recordings), consumed by zoom-meeting-context (spec 118,
+    # research.md R6) -- no config/openclaw.json entry, same treatment as
+    # Datadog (spec 016).
+    "Zoom Meetings MCP",
 ]
 
 
@@ -141,7 +152,7 @@ def count_mcp_integrations():
 
 
 def check_doc_claims(skill_count, mcp_count):
-    """Best-effort scan of README.md/SOUL.md for numeric skill/MCP claims.
+    """Check selected README.md/SOUL.md inventory claims.
 
     Deliberately scoped to the specific "headline" claim locations spec 047
     identified (top prose, HUD prose, section headings, SOUL.md identity
@@ -157,8 +168,10 @@ def check_doc_claims(skill_count, mcp_count):
     unlocatable = []
     notes = []
 
+    # Numeric claims provide capture groups to compare. Qualitative claims use
+    # the same fail-closed location check with an empty capture list.
     # (file, description, compiled pattern, [(kind, capture group index), ...])
-    headline_patterns = [
+    claim_patterns = [
         (README, "top prose (skills + MCP)",
          re.compile(r"Claude,\s*(\d+)\s*skills,\s*and\s*(\d+)\s*MCP integrations"),
          [("skill", 1), ("MCP", 2)]),
@@ -184,6 +197,22 @@ def check_doc_claims(skill_count, mcp_count):
         (README, "Skills section heading",
          re.compile(r"^## Skills \((\d+)\)", re.MULTILINE),
          [("skill", 1)]),
+        (README, "project tree (skills)",
+         re.compile(
+             r"^│\s+└── skills/\s+#\s+(\d+)\s+skill definitions \(source of truth\)$",
+             re.MULTILINE,
+         ),
+         [("skill", 1)]),
+        (README, "config/openclaw.json role (models + MCP registration)",
+         re.compile(
+             r"^\| `config/openclaw\.json` \| "
+             r"(?=[^|\n]*\bmodels?\b)"
+             r"(?=[^|\n]*\bMCP\b)"
+             r"(?![^|\n]*\bno\s+MCP\b)"
+             r"[^|\n]+ \|$",
+             re.IGNORECASE | re.MULTILINE,
+         ),
+         []),
         (SOUL, "identity line (skills + MCP)",
          re.compile(r"\*\*(\d+) skills\*\* backed by (\d+) MCP servers"),
          [("skill", 1), ("MCP", 2)]),
@@ -193,7 +222,7 @@ def check_doc_claims(skill_count, mcp_count):
     ]
 
     doc_cache = {}
-    for doc_path, description, pattern, kinds in headline_patterns:
+    for doc_path, description, pattern, kinds in claim_patterns:
         doc_name = os.path.basename(doc_path)
         if doc_path not in doc_cache:
             if not os.path.isfile(doc_path):

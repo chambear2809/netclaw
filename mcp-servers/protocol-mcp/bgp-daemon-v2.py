@@ -461,6 +461,9 @@ async def handle_n2n(method, path, body):
                     "channel_state": h["channel_state"], "last_seen": h["last_seen"],
                     "endpoint": f"{p.get('endpoint_host')}:{p.get('endpoint_port')}",
                     "endpoint_updated_at": p.get("endpoint_updated_at"),
+                    # Feature 108 (T014): transport visibility (FR-006)
+                    "transport": p.get("transport") or "ngrok",
+                    "edge_gate": p.get("edge_gate") or "none",
                     # Feature 100 (FR-014): dampened peers stay observable. Additive —
                     # no existing field renamed or retyped (contracts §6).
                     "attempts": h["attempts"],
@@ -472,7 +475,36 @@ async def handle_n2n(method, path, body):
                                          "progress": t["progress"], "target": t["target_name"]}
                                         for t in in_flight],
                 })
-            return 200, {"identity": fed.local_identity, "peers": peers}
+            # Edge nodes (phones) and any store-and-forward backlog waiting on
+            # them. A device with no usable push transport accumulates queued
+            # pushes silently otherwise — the whole class of failure this
+            # exposes is "it looked connected and nothing was arriving".
+            edge = []
+            for m in fed.risk.list_members():
+                if m.get("node_type") != "edge" or m.get("state") == "removed":
+                    continue
+                edge.append({
+                    "member_id": m["member_id"],
+                    "state": m["state"],
+                    "connected": m["member_id"] in fed.edge_channels,
+                    "push_platform": m.get("push_platform"),
+                    "queued": fed.edge_queue.depth(m["member_id"]),
+                })
+            # Spec 105: the listener's own state, not just the devices behind it.
+            # `_start_edge` runs as a task, so a bare attribute read can race
+            # startup — absent means "not yet decided", not "healthy".
+            edge_status = getattr(fed, "edge_status", {"state": "starting"})
+            # Feature 108 (T015): local tunnel health probe
+            from bgp.federation.transport_health import probe_local_transport
+            _health_check_enabled = os.environ.get(
+                "N2N_TRANSPORT_HEALTH_CHECK", "true"
+            ).strip().lower() not in ("false", "0", "no")
+            local_transport = probe_local_transport(
+                mgr.list_peers(), enabled=_health_check_enabled
+            )
+            return 200, {"identity": fed.local_identity, "peers": peers,
+                         "local_transport_healthy": local_transport,
+                         "edge_nodes": edge, "edge_listener": edge_status}
 
         if path == "/n2n/peers/forget-endpoint" and method == "POST":
             # Feature 100 (US4/FR-021/026): retire a stale dial endpoint without shell
@@ -502,6 +534,29 @@ async def handle_n2n(method, path, body):
                 logger.warning("forget-endpoint audit failed for %s: %s", ident, e)
             return 200, result
 
+        # Feature 108 (T018): per-peer edge-gate toggle (FR-005, US2).
+        # This is the ONLY way edge_gate changes from its 'none' default —
+        # never implied by setting transport=cloudflare_tunnel.
+        if path == "/n2n/peer/edge_gate" and method == "POST":
+            peer_ident = body.get("peer")
+            new_gate = body.get("edge_gate")
+            if not peer_ident:
+                return 400, {"error": "missing required field 'peer'"}
+            if new_gate not in ("cloudflare_access", "none"):
+                return 400, {"error": "edge_gate must be 'cloudflare_access' or 'none'"}
+            existing = mgr.get_peer(peer_ident)
+            if not existing:
+                return 404, {"error": f"unknown peer {peer_ident}"}
+            # Parse AS/router-id from identity to call upsert_peer
+            m = re.match(r"as(\d+)-(.+)", peer_ident)
+            if not m:
+                return 400, {"error": "peer identity must be 'as<AS>-<router-id>'"}
+            pa, rid = int(m.group(1)), m.group(2)
+            mgr.upsert_peer(pa, rid, edge_gate=new_gate)
+            updated = mgr.get_peer(peer_ident)
+            return 200, {"peer": peer_ident, "edge_gate": updated["edge_gate"],
+                         "transport": updated.get("transport") or "ngrok"}
+
         if path == "/n2n/connect" and method == "POST":
             if not all(body.get(k) for k in ("peer", "host", "port")):
                 return 400, {"error": "missing required field 'peer', 'host', or 'port'"}
@@ -509,8 +564,10 @@ async def handle_n2n(method, path, body):
             if not m:
                 return 400, {"error": "peer must be 'as<AS>-<router-id>'"}
             pa, rid = int(m.group(1)), m.group(2)
+            # Feature 108 (T007): optional transport hint (ngrok, cloudflare_tunnel, etc.)
+            transport = body.get("transport")
             state = mgr.local_consent(pa, rid, body.get("display_name"))
-            asyncio.create_task(fed.open_channel(pa, rid, body["host"], int(body["port"])))
+            asyncio.create_task(fed.open_channel(pa, rid, body["host"], int(body["port"]), transport=transport))
             return 200, {"identity": body["peer"], "state": state.value, "dialing": True}
 
         if path == "/n2n/trust" and method == "POST":
@@ -712,14 +769,24 @@ async def handle_n2n(method, path, body):
             member_id = body.get("member_id")
             if not member_id:
                 return 400, {"error": "member_id required"}
-            ch = fed.member_channels.pop(member_id, None)
-            if ch is not None:
-                try:
-                    await ch.close()
-                except Exception:
-                    pass
+            # Close whichever channel registry holds it. An edge node's channel
+            # lives in edge_channels, NOT member_channels (feature 066) — only
+            # popping member_channels meant retiring a *connected* phone left its
+            # live channel open and serving traffic (FR-017).
+            for registry in (fed.member_channels, fed.edge_channels):
+                ch = registry.pop(member_id, None)
+                if ch is not None:
+                    try:
+                        await ch.close()
+                    except Exception:
+                        pass
+            # Retiring an enrollment must not leave its undelivered backlog
+            # behind: queue rows are keyed by member_id and a re-enrolled device
+            # gets a new one, so nothing would ever claim them (FR-017).
+            purged = fed.edge_queue.purge_member(member_id)
             ok = fed.risk.remove_member(member_id)
-            return (200 if ok else 404), {"removed": ok, "member_id": member_id}
+            return (200 if ok else 404), {"removed": ok, "member_id": member_id,
+                                          "queued_purged": purged}
 
         if path == "/n2n/members/add" and method == "POST":
             name = body.get("name")
@@ -771,23 +838,85 @@ async def handle_n2n(method, path, body):
                 "designated_by": "agent",
                 "pushed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            # Spec 106. The three delivery tiers below used to be mutually
+            # exclusive, and two of the three exits lost the message outright:
+            #
+            #  1. A platform push counted as *delivery*, so it never enqueued.
+            #     But a push notification only draws the OS banner — the sole
+            #     writer to the phone's MessageFeedStore is the WS handler for
+            #     `n2n/edge/message`, and nothing on the device persists an
+            #     FCM data payload. So the operator saw a notification, opened
+            #     the app, and found an empty feed: `queued=0` on the Border and
+            #     no `Replaying` line, because the content was never written
+            #     down anywhere. Reported from production 2026-08-13.
+            #
+            #  2. Only ValueError fell through to the fallback. `push_to_edge`
+            #     raises ValueError just for "not connected" — a channel that
+            #     exists but whose device is suspended raises
+            #     RpcError(ERR_EXECUTION_TIMEOUT) after the 30s call timeout,
+            #     and a closed socket raises a websockets error. Both escaped to
+            #     the outer handler as a 500: no push, no queue, message gone.
+            #     That is the common case for an iOS device, which holds a
+            #     registered channel for seconds after backgrounding.
+            #
+            # A platform push is now treated as a WAKE SIGNAL, not a delivery:
+            # every path that does not confirm live in-app delivery also
+            # persists, and replay on next connect is what actually populates
+            # the feed. Bounded already — EdgeQueue enforces a per-member depth
+            # cap and TTL on every enqueue (newest-wins), so this cannot grow
+            # federation.db without limit.
+            live_failure = None
             try:
                 result = await fed.push_to_edge(member_id, push)
                 return 200, {"delivered": True, "member_id": member_id, "result": result}
-            except ValueError:
-                # Not connected -- platform push-notification fallback
-                # (FR-011, US3/T031).
-                from bgp.federation import push_notify
-                member = fed.risk.get_member(member_id)
-                if not member:
-                    return 404, {"error": f"unknown member {member_id}"}
+            except ValueError as e:
+                live_failure = f"not connected ({e})"
+            except Exception as e:
+                # Registered but unreachable: call timeout, closed socket, RPC
+                # error from the device. Falling through is strictly better than
+                # a 500 — the operator's message survives either way.
+                live_failure = f"live delivery failed ({type(e).__name__}: {e})"
+                logger.warning("Edge live push to %s failed, falling back: %s",
+                               member_id, e)
+
+            from bgp.federation import push_notify
+            member = fed.risk.get_member(member_id)
+            if not member:
+                return 404, {"error": f"unknown member {member_id}"}
+
+            def _persist(reason):
+                """Enqueue for replay. Never let a bookkeeping failure convert an
+                otherwise-successful push into a 500."""
                 try:
-                    result = await push_notify.send_push_notification(member, push)
-                    return 200, {"delivered": True, "via": "push_notification",
-                                "member_id": member_id, "result": result}
-                except Exception as e:
-                    logger.warning("Push-notification fallback failed for %s: %s", member_id, e)
-                    return 200, {"delivered": False, "reason": str(e), "member_id": member_id}
+                    return fed.edge_queue.enqueue(member_id, push, reason=reason)
+                except Exception as qe:
+                    logger.error("Edge queue enqueue failed for %s: %s", member_id, qe)
+                    return None
+
+            try:
+                result = await push_notify.send_push_notification(member, push)
+            except Exception as e:
+                # Neither live WS nor a platform push could reach the device.
+                # The only delivery path for a device with no working push
+                # credentials, where the OS suspends the socket on background
+                # and nothing can wake the app.
+                logger.warning("Push-notification fallback failed for %s: %s", member_id, e)
+                queue_id = _persist(f"{live_failure}; push notification failed ({e})")
+                return 200, {"delivered": False, "queued": queue_id is not None,
+                             "queue_id": queue_id,
+                             "queue_depth": fed.edge_queue.depth(member_id),
+                             "reason": str(e), "member_id": member_id}
+
+            # Push accepted by the platform. That wakes the device; it does NOT
+            # put the content in the app. Persist so the next connect replays it.
+            queue_id = _persist(f"{live_failure}; wake-signal push sent, awaiting reconnect")
+            return 200, {"delivered": True, "via": "push_notification",
+                         "member_id": member_id, "result": result,
+                         # Explicit so a caller can tell a banner-only wake from
+                         # confirmed in-app delivery.
+                         "in_app_delivery": "pending_replay",
+                         "queued": queue_id is not None, "queue_id": queue_id,
+                         "queue_depth": fed.edge_queue.depth(member_id)}
 
         return 404, {"error": f"unknown n2n route {path}"}
     except Exception as e:
@@ -878,13 +1007,30 @@ async def _start_edge(fed):
     same domain-verified/self-signed credential as eN2N/iN2N via
     host_credential() + tls.server_context() (research D1) — deliberately NOT
     internal_channel.build_ssl_contexts, which is the older risk-CA/self-signed
-    path and does not carry the domain-verified cert."""
+    path and does not carry the domain-verified cert.
+
+    Every exit path records why on `fed.edge_status` (spec 105). Before that, a
+    listener that never bound left no trace outside one journal line, and the
+    only user-facing symptom was `risk token --edge` refusing to mint —
+    reported as "only a Border can issue enrollment tokens", which points at
+    the role even when the role is correct and the real cause is a missing
+    dependency. First real-world install lost hours to exactly that."""
+    def _status(state, **kw):
+        fed.edge_status = {"state": state, **kw}
+
     try:
-        if not (fed.risk.is_border() and fed.risk.stack_enabled("in2n")):
+        if not fed.risk.is_border():
+            _status("not_border", role=fed.risk.role(),
+                    hint="promote this claw: netclaw risk role border <risk-name>")
+            return
+        if not fed.risk.stack_enabled("in2n"):
+            _status("stack_disabled", enabled_stacks=fed.risk.get_risk().get("enabled_stacks"),
+                    hint="enable the in2n stack: netclaw risk role border <risk-name> in2n")
             return
         port = int(os.environ.get("N2N_EDGE_WS_PORT", "0") or 0)
         if not port:
             logger.info("Edge (NetClaw Mobile): set N2N_EDGE_WS_PORT to accept phone dial-ins")
+            _status("no_port", hint="set N2N_EDGE_WS_PORT=8443 in ~/.openclaw/.env")
             return
         import websockets
         from bgp.federation import tls as _tls
@@ -926,10 +1072,43 @@ async def _start_edge(fed):
             max_size=NCFED_MAX_MESSAGE,
         )
         fed._edge_server = server  # keep a ref
+        _status("listening", port=port,
+                domain=os.environ.get("N2N_CLAW_DOMAIN") or None)
         logger.info("Edge (NetClaw Mobile) WS listener on 0.0.0.0:%d (risk=%s)",
                    port, fed.risk.get_risk().get("risk_name"))
+    except ModuleNotFoundError as e:
+        # The single most likely first-install failure, and the one whose
+        # surface error is most misleading. `websockets` is declared in
+        # protocol-mcp/requirements.txt, but that file is only installed by the
+        # optional `protocol` component — selecting N2N without it yields a mesh
+        # daemon that cannot bind the edge listener. Name the remedy here rather
+        # than leaving the operator to infer it from an ImportError.
+        mod = getattr(e, "name", None) or str(e)
+        hint = (f"python3 -m pip install --break-system-packages {mod}"
+                f"   (or: apt install python3-{mod})")
+        logger.error("Edge WS start FAILED — missing Python module %r for %s. Remedy: %s",
+                     mod, sys.executable, hint)
+        _status("failed", port=port, error=f"missing module {mod!r}",
+                interpreter=sys.executable, hint=hint)
     except Exception as e:
         logger.error("Edge WS start error: %s", e)
+        _status("failed", port=port, error=str(e))
+
+
+async def _start_zoom(fed):
+    """Spec 118: starts the loopback-only Zoom channel that zoom-rtms-mcp
+    connects to, if N2N_ZOOM_CHANNEL_PORT is set. Disabled by default, same
+    opt-in shape as _start_edge — a claw that never runs zoom-rtms-mcp is
+    unaffected."""
+    port = int(os.environ.get("N2N_ZOOM_CHANNEL_PORT", "0") or 0)
+    if not port:
+        logger.info("Zoom channel: set N2N_ZOOM_CHANNEL_PORT to accept zoom-rtms-mcp connections")
+        return
+    try:
+        from bgp.federation import zoom_channel
+        await zoom_channel.start_server(fed, port)
+    except Exception as e:
+        logger.error("Zoom channel start error: %s", e)
 
 
 async def _start_cert_lifecycle(fed):
@@ -1417,6 +1596,10 @@ async def main():
         # NCFED Edge Node (feature 066): a Border listens for phone dial-ins
         # over a WebSocket transport if N2N_EDGE_WS_PORT is set.
         asyncio.create_task(_start_edge(_federation))
+        # Zoom Meeting Intelligence (spec 118): a Border listens for the local
+        # zoom-rtms-mcp process to connect over a loopback channel, if
+        # N2N_ZOOM_CHANNEL_PORT is set.
+        asyncio.create_task(_start_zoom(_federation))
         # Claw certification (feature 060): obtain/refresh the domain-verified
         # credential (if configured) and run the automatic renewal scheduler.
         asyncio.create_task(_start_cert_lifecycle(_federation))

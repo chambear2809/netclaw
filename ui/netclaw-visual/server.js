@@ -160,6 +160,7 @@ const INTEGRATION_CATALOG = [
   { id: 'catc', name: 'Catalyst Center (read-only)', category: 'Device Automation', prefixes: ['catc_'], color: '#00bceb', transport: 'stdio', toolEstimate: 10, description: 'All 514 read-only Catalyst Center operations behind 8 grouped dispatchers plus find/describe — 1,821-token manifest where inlining every tool would cost 64,420. Adopts Cisco official catalogue (Apache-2.0), not its runtime. An empty inventory is a statement about the controller, never about the network.' },
   { id: 'document', name: 'Document Generation', category: 'Platform Services', prefixes: ['docx_', 'xlsx_', 'pptx_', 'pdf_', 'list_documents'], color: '#4c956c', transport: 'stdio', toolEstimate: 6, description: 'Change-record .docx, audit .xlsx, exec .pptx and PDF form filling from real NetClaw data. No credentials, writes files only. Per-element provenance at a chokepoint — a missing value renders as NOT AVAILABLE, never as a blank.' },
   { id: 'globalping', name: 'Globalping', category: 'Observability', prefixes: ['globalping-'], color: '#00b4d8', transport: 'http', toolEstimate: 12, description: 'Outside-in measurement from ~4,800 probes across ~1,390 ASNs — ping, traceroute, DNS, MTR and HTTP toward a public target. The only vantage point NetClaw has outside its own administrative domain. Public endpoints only; "no probes matched" is not "the service is down".' },
+  { id: 'topolograph', name: 'Topolograph', category: 'Observability', prefixes: ['topolograph-'], color: '#2e7d32', transport: 'http', toolEstimate: 27, description: 'OSPF/IS-IS link-state and BGP topology analysis over a stored Topolograph snapshot — shortest/backup path, per-area nodes/edges with role flags, MPLS-TE/CSPF feasibility, topology-change event timeline, edge/node failure simulation, plus BGP speakers/sessions/route search, VRF/VPN inventory, and BGP-to-IGP graph binding. Sees the topology as a graph, not one device\'s routing table. Remote HTTP against the operator\'s own instance, read-only.' },
   { id: 'suzieq', name: 'SuzieQ', category: 'Observability', prefixes: ['suzieq-'], color: '#a8dadc', transport: 'stdio', toolEstimate: 5, description: 'Network state queries, assertions, summaries, and path tracing.' },
   { id: 'aws', name: 'AWS', category: 'Cloud', prefixes: ['aws-'], color: '#f77f00', transport: 'http', toolEstimate: 55, description: 'Networking, monitoring, security, cost, and diagram generation in AWS.' },
   { id: 'gcp', name: 'GCP', category: 'Cloud', prefixes: ['gcp-'], color: '#f3722c', transport: 'http', toolEstimate: 40, description: 'Compute, monitoring, and logging coverage for GCP.' },
@@ -196,6 +197,8 @@ const INTEGRATION_CATALOG = [
   { id: 'auvik', name: 'Auvik', category: 'Observability', prefixes: ['auvik-'], color: '#0a9396', transport: 'stdio', toolEstimate: 20, description: 'Read-only Auvik network monitoring — inventory, alerts, lifecycle/warranty, and performance statistics across MSP tenants.' },
   { id: 'claroty', name: 'Claroty xDome', category: 'Security', prefixes: ['claroty-'], color: '#00a3a3', transport: 'stdio', toolEstimate: 21, description: 'OT / IoT / IoMT visibility — asset discovery, Purdue Model classification, alert and vulnerability triage, communication-map topology, all writes ITSM-gated.' },
   { id: 'threejs-viz', name: 'Three.js Network Viz', category: 'Visualization', prefixes: ['threejs-network-viz'], color: '#049ef4', transport: 'stdio', toolEstimate: 3, description: 'Browser-based 3D network topology visualization — single self-contained HTML file, no desktop app/GPU/server required. Optional real-3D-model stencil mode via the vendored sketchfab-mcp-server (3 tools: search, model-details/license-verification, download), filtered to CC0-licensed models only.' },
+  { id: 'comfyui-viz', name: 'ComfyUI Topology Viz', category: 'Visualization', prefixes: ['comfyui-topology-viz', 'topology-diagram-mcp', 'image-style-mcp'], color: '#8a3ffc', transport: 'stdio', toolEstimate: 8, description: 'AI-generated stylized still images of a network topology. Spec 121 federated path (preferred, live topology sources): a deterministic diagram (topology-diagram-mcp, real role icons/labels/connections, no diffusion) restyled by an image-edit diffusion pass (image-style-mcp), both run on the johns-risk/viz federation member via n2n/tools/call. Falls back to the original comfyui-mcp Flux+ControlNet path (6 of its 41 tools used) for freeform requests or when that member is unreachable. Stills only in v1.' },
+  { id: 'worldlabs-viz', name: 'World Labs Fantastical Viz', category: 'Visualization', prefixes: ['worldlabs-topology-viz', 'worldlabs-marble-mcp'], color: '#ff6b9d', transport: 'stdio', toolEstimate: 3, description: 'AI-augmented, explorable 3D "world" visualization of a real network topology via World Labs Marble (spec 122). Free, instant, no-cost themed prompt preview; a real credit-spending generation only runs after explicit two-layer confirmation (conversational and a required user_confirmed argument the tool itself validates). Explicitly decorative — reuses topology-diagram-mcp\'s accurate diagram as the authoritative artifact, standalone on Border, no federation member required.' },
   { id: 'chrome-devtools', name: 'Chrome DevTools', category: 'Browser Automation', prefixes: ['chrome-devtools-', 'browser-viz-verify', 'browser-gui-inspect'], color: '#4285f4', transport: 'npx', toolEstimate: 20, description: 'Controlled browser automation/inspection — visualization render QA, controller GUI gap-filling, undocumented vendor API discovery via network-request capture, general web-GUI automation. No credentials; auth via one-time manual sign-in into a persistent Chrome profile.' },
   { id: 'computer-use', name: 'Computer Use', category: 'Desktop Automation', prefixes: ['desktop-gui-inspect'], color: '#f9ab00', transport: 'script', toolEstimate: 17, description: 'Full-desktop automation for legacy tools with no browser or API path — virtual Xvfb+XFCE desktop, 17 xdotool-driven actions, VNC/noVNC Watch Mode (loopback-only). No credentials; installed via OpenClaw\'s ClawHub skill mechanism, not a vendored MCP server.' },
 ];
@@ -526,6 +529,22 @@ const ENV_MAP = {
     files: ['config/openclaw.json (remote endpoint — no vendored server)'],
     notes: 'Official jsDelivr remote MCP at https://mcp.globalping.dev/mcp, bearer token, streamable HTTP + SSE. No local server by design (spec 079 R1). 5 measurement tools (ping/traceroute/dns/mtr/http) plus limits/locations; 6 of the 12 advertised tools take only the analytics `context` argument. Budget is 500 probe-measurements/hour authenticated (250 anonymous per IP) and is charged PER PROBE — limit:20 spends 20 — so right-size limit rather than maximising it. Public targets only: RFC1918/loopback/link-local are refused locally BEFORE calling out, so internal addressing is never transmitted. Location syntax: + is AND (London+UK), arrays for multiple places, world for a global spread, AS3320 for an ASN; a comma inside one string fails, and AS13335 (the vendor\'s own schema example) never returns probes because Cloudflare hosts none. Every tool requires a natural-language `context` field the vendor uses for intent analytics — NetClaw sends a generic task-shaped value only.',
   },
+  'topolograph': {
+    env: ['TOPOLOGRAPH_API_TOKEN', 'TOPOLOGRAPH_MCP_URL'],
+    files: ['config/openclaw.json (remote endpoint — no vendored server)'],
+    notes: 'Remote HTTP MCP (spec 119 IGP, spec 120 BGP) against the operator\'s OWN Topolograph instance — TOPOLOGRAPH_MCP_URL overrides the default hosted endpoint, bearer TOPOLOGRAPH_API_TOKEN, 401 without it. Fronts an operator-run HTTP API developed upstream, so it is registered by url in config/openclaw.json rather than vendored (same shape as globalping). 27 read-only analysis tools: 13 IGP (get_all_graphs/get_graph_by_time/get_graph_status, get_nodes/get_edges/get_network_by_graph_time/get_lsps, get_shortest_path/get_cspf_path, get_edge_failure_reaction (failure simulation), get_network_events/get_adjacency_events/get_events_timeline) plus 14 BGP (list_bgp_graphs/get_bgp_graph, list_bgp_nodes/list_bgp_sessions, search_bgp_routes, get_bgp_node_route_summary/get_bgp_route_state, compare_bgp_routes, get_bgp_events_timeline, list_bgp_bindings/get_bgp_binding, resolve_route, get_vrf_inventory/list_vpn_routers — requires Topolograph >= 2.69). The server runs TOPOLOGRAPH_MCP_READ_ONLY=true so upload_graph and the *_lsp mutation tools are absent from tools/list; the client allowlist is set with `defenseclaw tool allow topolograph-mcp <tool>` (never toolFilter in config). Every result is over a STORED graph_time/bgp_graph_time — report its age — and get_edge_failure_reaction / get_cspf_path / resolve_route are predictions, not events. Boundary: reasons over the whole area LSDB or BGP RIB as a graph; per-device RIB/LSDB stays with pyats-routing / pyats-junos-routing / multivendor-device-query.',
+  },
+  'zoom-rtms': {
+    env: ['ZOOM_CLIENT_ID', 'ZOOM_CLIENT_SECRET', 'ZOOM_ACCOUNT_ID', 'ZOOM_RTMS_WEBHOOK_SECRET',
+          'N2N_ZOOM_CHANNEL_PORT', 'N2N_ZOOM_CHANNEL_SECRET'],
+    files: ['mcp-servers/zoom-rtms-mcp/server.py'],
+    notes: 'NetClaw for Zoom — Meeting Intelligence (spec 118). Realtime Media Streams (not a '
+      + 'Meeting SDK bot) feed a deterministic extractor that recognizes network-investigation '
+      + 'questions and routes them into the existing Border/NCFED path via a new loopback-only '
+      + 'bgp/federation/zoom_channel.py channel. Feeds the Zoom App side panel (avatar + live '
+      + 'status) with an optional Layers API camera overlay. No new device-write approval '
+      + 'mechanism — reuses NetClaw\'s existing gate unchanged.',
+  },
   'cisco-psirt': {
     env: ['CISCO_CLIENT_ID', 'CISCO_CLIENT_SECRET', 'CISCO_PSIRT_CACHE_DIR', 'CISCO_PSIRT_CACHE_TTL_S'],
     files: ['mcp-servers/cisco-psirt-mcp/server.py'],
@@ -600,6 +619,16 @@ const ENV_MAP = {
     env: ['SKETCHFAB_API_KEY', 'SKETCHFAB_USERNAME'],
     files: ['mcp-servers/sketchfab-mcp-server/'],
     notes: 'Only needed for optional real-3D-model stencil mode. Token from https://sketchfab.com/settings/password. Procedural-shape rendering works with zero configuration.',
+  },
+  'comfyui-viz': {
+    env: ['COMFYUI_URL'],
+    files: ['mcp-servers/comfyui-mcp/', 'mcp-servers/topology-diagram-mcp/', 'mcp-servers/image-style-mcp/'],
+    notes: 'Endpoint of a separately-running ComfyUI instance (not installed/managed by NetClaw). Requires at least one image-generation checkpoint installed in ComfyUI itself — reports a distinct, actionable message if none is found rather than failing silently. The federated path (spec 121) additionally requires the johns-risk/viz federation member to be live.',
+  },
+  'worldlabs-viz': {
+    env: ['WLT_API_KEY'],
+    files: ['mcp-servers/worldlabs-marble-mcp/', 'workspace/skills/worldlabs-topology-viz/'],
+    notes: 'Only needed for the generate step (spends real World Labs credits, ~5 minutes per world) — the free preview mode needs no credential at all. Requires a funded World Labs account (platform.worldlabs.ai/billing). generate_world itself refuses to run without an explicit user_confirmed=true argument, in addition to the conversational confirmation the skill also requires.',
   },
 };
 
@@ -1271,9 +1300,256 @@ app.put('/api/env', disabledInPublicMode, (req, res) => {
   }
 });
 
+// ── Budget status & configuration (spec 109) ──────────────────────────────────
+//
+// Budget enforcement lives in the token-tracker skill (Python, src/netclaw_tokens/).
+// The HUD provides visibility and configuration — reading the current budget policy
+// from openclaw.json and the active session's cost from the sessions directory.
+
+app.get('/api/budget/status', (req, res) => {
+  try {
+    const config = JSON.parse(readText(path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json')) || '{}');
+    const policy = resolveBudgetPolicy(config);
+
+    // Find the most recent active session and estimate cost from its size/metadata
+    const sessionCost = estimateActiveSessionCost();
+
+    const pct = policy.sessionBudgetUsd > 0
+      ? Math.min(100, Math.round((sessionCost / policy.sessionBudgetUsd) * 100))
+      : 0;
+
+    let status = 'ok';
+    if (pct >= 100) status = 'halted';
+    else if (pct >= 80) status = 'critical';
+    else if (pct >= 50) status = 'warning';
+
+    res.json({
+      sessionCostUsd: Math.round(sessionCost * 100) / 100,
+      sessionBudgetUsd: policy.sessionBudgetUsd,
+      maxToolCallsPerTurn: policy.maxToolCallsPerTurn,
+      percentUsed: pct,
+      status,
+      model: policy.model || null,
+      interfaceDefaults: policy.interfaceDefaults || {},
+    });
+  } catch (err) {
+    res.json({
+      sessionCostUsd: 0,
+      sessionBudgetUsd: 5.0,
+      maxToolCallsPerTurn: 20,
+      percentUsed: 0,
+      status: 'unknown',
+      error: err.message,
+    });
+  }
+});
+
+app.get('/api/budget/config', (req, res) => {
+  try {
+    const config = JSON.parse(readText(path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json')) || '{}');
+    const budget = config?.agents?.defaults?.budget || {};
+    const interfaceDefaults = config?.agents?.defaults?.interfaceDefaults || {};
+    res.json({
+      budget: {
+        sessionBudgetUsd: budget.sessionBudgetUsd ?? 5.0,
+        maxToolCallsPerTurn: budget.maxToolCallsPerTurn ?? 20,
+        contextWarningTokens: budget.contextWarningTokens ?? 100000,
+        allowOverride: budget.allowOverride ?? true,
+        overrideIncrementUsd: budget.overrideIncrementUsd ?? 2.0,
+      },
+      interfaceDefaults,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/budget/config', (req, res) => {
+  const { budget, interfaceDefaults } = req.body || {};
+  if (!budget && !interfaceDefaults) {
+    return res.status(400).json({ error: 'Expected { budget: {...} } and/or { interfaceDefaults: {...} }' });
+  }
+
+  try {
+    const configPath = path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
+    const config = JSON.parse(readText(configPath) || '{}');
+
+    // Ensure path exists
+    if (!config.agents) config.agents = {};
+    if (!config.agents.defaults) config.agents.defaults = {};
+
+    // Merge budget values (only provided fields, don't clobber unset ones)
+    if (budget) {
+      if (!config.agents.defaults.budget) config.agents.defaults.budget = {};
+      const validKeys = ['sessionBudgetUsd', 'maxToolCallsPerTurn', 'contextWarningTokens', 'allowOverride', 'overrideIncrementUsd'];
+      for (const key of validKeys) {
+        if (budget[key] !== undefined) {
+          config.agents.defaults.budget[key] = budget[key];
+        }
+      }
+    }
+
+    // Merge interface defaults
+    if (interfaceDefaults) {
+      if (!config.agents.defaults.interfaceDefaults) config.agents.defaults.interfaceDefaults = {};
+      for (const [iface, settings] of Object.entries(interfaceDefaults)) {
+        config.agents.defaults.interfaceDefaults[iface] = {
+          ...(config.agents.defaults.interfaceDefaults[iface] || {}),
+          ...settings,
+        };
+      }
+    }
+
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+    broadcastWS('config:updated', { keys: ['budget'], generatedAt: new Date().toISOString() });
+    res.json({ ok: true, budget: config.agents.defaults.budget, interfaceDefaults: config.agents.defaults.interfaceDefaults });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Resolve budget policy from config (mirrors Python budget_policy.py logic).
+ * Returns merged defaults for display purposes.
+ */
+function resolveBudgetPolicy(config) {
+  const defaults = config?.agents?.defaults || {};
+  const budget = defaults.budget || {};
+  const interfaceDefaults = defaults.interfaceDefaults || {};
+
+  return {
+    sessionBudgetUsd: parseFloat(process.env.NETCLAW_SESSION_BUDGET_USD || '') || budget.sessionBudgetUsd || 5.0,
+    maxToolCallsPerTurn: budget.maxToolCallsPerTurn || 20,
+    contextWarningTokens: budget.contextWarningTokens || 100000,
+    allowOverride: budget.allowOverride !== false,
+    overrideIncrementUsd: budget.overrideIncrementUsd || 2.0,
+    model: null, // Global default; interface-specific in interfaceDefaults
+    interfaceDefaults,
+  };
+}
+
+/**
+ * Estimate cost of the most recently active session by reading its JSONL
+ * and summing any usage blocks. Returns 0 if no active session or no data.
+ */
+function estimateActiveSessionCost() {
+  try {
+    const sessionsDir = path.join(process.env.HOME || '/root', '.openclaw', 'agents', 'main', 'sessions');
+    const sessionsJson = path.join(sessionsDir, 'sessions.json');
+    if (!fs.existsSync(sessionsJson)) return 0;
+
+    const sessions = JSON.parse(readText(sessionsJson) || '{}');
+    // Find the most recently updated session
+    let newest = null;
+    let newestTime = 0;
+    for (const [, sess] of Object.entries(sessions)) {
+      const t = sess.updatedAt || 0;
+      if (t > newestTime) {
+        newestTime = t;
+        newest = sess;
+      }
+    }
+
+    if (!newest || !newest.sessionFile) return 0;
+    if (!fs.existsSync(newest.sessionFile)) return 0;
+
+    // Count message lines as a rough proxy for API calls
+    // Real cost tracking comes from Prometheus; this is a fast HUD estimate
+    const content = readText(newest.sessionFile) || '';
+    const lines = content.split('\n').filter(Boolean);
+    let assistantTurns = 0;
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === 'message' && entry.message?.role === 'assistant') {
+          assistantTurns++;
+        }
+      } catch { /* skip unparseable lines */ }
+    }
+
+    // Rough estimate: each assistant turn ≈ 50K input tokens on Sonnet ($0.15) + 1K output ($0.015)
+    // This is intentionally conservative — better to show slightly high than low
+    const estimatedCostPerTurn = 0.17;
+    return assistantTurns * estimatedCostPerTurn;
+  } catch {
+    return 0;
+  }
+}
+
 // ── Testbed device config ──────────────────────────────────────────
 app.get('/api/testbed/raw', disabledInPublicMode, (req, res) => {
   res.type('text/yaml').send(readText(TESTBED_FILE) || '# No testbed found');
+});
+
+// ── Layout persistence (feature 102, US3) ────────────────────────────────────
+//
+// SCOPED EXCEPTION. Specs 072 and 101 both forbade changing server.js; the operator
+// chose server-side persistence so a layout follows them across browsers. FR-032
+// narrows the exception to these three routes — /api/n2n and /api/graph are
+// untouched — and this is a new route in an existing pattern, since the server
+// already accepts writes (PUT /api/env, PUT /api/testbed/raw).
+//
+// Validation is the SHARED pure module, so the browser cannot construct a payload
+// the server would reject and vice versa. A second validator here would drift from
+// the client's within a release.
+import { validateLayout } from './src/orgchart/layout-payload.js';
+
+// FR-034: a module constant. No path component may derive from a request.
+const LAYOUT_FILE = path.join(os.homedir(), '.openclaw', 'netclaw-hud-layout.json');
+const LAYOUT_MAX_BYTES = 256 * 1024;
+
+app.get('/api/layout', (req, res) => {
+  // Absence is a normal first-run condition, NOT an error — making the client
+  // distinguish 404-means-none from 404-means-broken is a needless trap.
+  try {
+    if (!fs.existsSync(LAYOUT_FILE)) return res.json({ version: 1, empty: true });
+    const raw = fs.readFileSync(LAYOUT_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const check = validateLayout(parsed);
+    if (!check.ok) {
+      // FR-019: fall back to computed AND say so. A 500 would be indistinguishable
+      // from the server being down, and the HUD would render identically either way.
+      return res.json({ version: 1, empty: true, warning: `saved layout rejected: ${check.error}` });
+    }
+    return res.json(parsed);
+  } catch (e) {
+    return res.json({ version: 1, empty: true, warning: `saved layout unreadable: ${e.message}` });
+  }
+});
+
+app.put('/api/layout', disabledInPublicMode, (req, res) => {
+  const body = req.body;
+  // FR-033: bound per-route. The global express.json({limit:'4mb'}) is far too
+  // permissive for a layout file and must not be relied on as the bound.
+  const size = JSON.stringify(body ?? null).length;
+  if (size > LAYOUT_MAX_BYTES) {
+    return res.status(400).json({ error: `payload ${size} bytes exceeds ${LAYOUT_MAX_BYTES}` });
+  }
+  const check = validateLayout(body);
+  if (!check.ok) return res.status(400).json({ error: check.error });
+
+  // Validate before touching disk, then write atomically: a crash mid-write must not
+  // leave a truncated file that fails every subsequent read.
+  try {
+    fs.mkdirSync(path.dirname(LAYOUT_FILE), { recursive: true });
+    const tmp = `${LAYOUT_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(body, null, 2), 'utf8');
+    fs.renameSync(tmp, LAYOUT_FILE);
+    return res.json({ saved: true, savedAt: new Date().toISOString() });
+  } catch (e) {
+    return res.status(507).json({ error: `write failed: ${e.message}` });
+  }
+});
+
+app.delete('/api/layout', disabledInPublicMode, (req, res) => {
+  // FR-017: discardable. Without this a bad saved layout is unremovable from the UI,
+  // since "reset to computed" only covers the current session.
+  try {
+    if (fs.existsSync(LAYOUT_FILE)) fs.unlinkSync(LAYOUT_FILE);
+    return res.json({ discarded: true });
+  } catch (e) {
+    return res.status(507).json({ error: `discard failed: ${e.message}` });
+  }
 });
 
 app.put('/api/testbed/raw', disabledInPublicMode, (req, res) => {

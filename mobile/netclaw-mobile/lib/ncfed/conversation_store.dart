@@ -17,7 +17,8 @@ class ConversationTurn {
   // -- distinct from [state]; a completed-but-unacknowledged turn still
   // counts toward the unread badge.
   bool acknowledged;
-  // Which surface submitted this turn -- "phone" or "watch" (073/FR-016).
+  // Which surface submitted this turn -- "phone", "watch" (073/FR-016), or
+  // "siri" (111/FR-011, a Siri/App-Intents ask via a headless engine).
   // Purely informational; no requirement reads it back for behavior.
   String origin;
 
@@ -82,6 +83,18 @@ class ConversationStore {
   /// settable-after-construction pattern.
   void Function(ConversationTurn turn)? onCompleted;
 
+  /// Fires at the end of [addPending] regardless of which of its several
+  /// call sites (a normal submit, a retry, a photo-attached submit) invoked
+  /// it (113/FR-004, research.md R4) -- the same "one hook, not duplicated
+  /// wiring per call site" reasoning [onCompleted] already exists for.
+  void Function(ConversationTurn turn)? onAdded;
+
+  /// Fires in [updateState] whenever the new state is any of
+  /// completed/failed/cancelled (113/FR-007, research.md R4) -- distinct
+  /// from [onCompleted]'s completed-only trigger, which must stay unchanged
+  /// for its own existing chat-notification purpose.
+  void Function(ConversationTurn turn)? onTerminal;
+
   ConversationStore(this.directory);
 
   List<ConversationTurn> get turns => List.unmodifiable(_turns);
@@ -132,6 +145,7 @@ class ConversationStore {
       origin: origin,
     ));
     await _save();
+    onAdded?.call(_turns.last);
   }
 
   /// Marks the turn with this [taskId] as acknowledged -- clears its unread
@@ -173,6 +187,7 @@ class ConversationStore {
         if (answerText != null) t.answerText = answerText;
         await _save();
         if (state == 'completed') onCompleted?.call(t);
+        if (_isTerminal(state)) onTerminal?.call(t);
         return;
       }
     }

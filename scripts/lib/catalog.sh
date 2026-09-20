@@ -15,6 +15,9 @@ CATALOG=(
     "radkit|Device Automation|Cisco RADKit|Cloud-relayed remote CLI, SNMP, inventory (5 tools)"
     "multivendor-cli|Device Automation|Multivendor CLI Driver|Nornir/NAPALM/Netmiko — ~90 platform families Cisco/Juniper servers cannot reach (read-only)"
 
+    "percepxion|Out-of-Band|Lantronix Percepxion|Fleet-wide OOB console-server SaaS — device inventory, firmware compliance/rollout, config mgmt, Smart Groups, security audit, async CLI dispatch (37 tools, external/on-demand)"
+    "slc|Out-of-Band|Lantronix SLC direct|Direct, synchronous single-device OOB console-server access — port status, session mgmt, sync CLI output, cellular status (37 tools, external/on-demand)"
+
     "netbox|Source of Truth|NetBox|DCIM/IPAM source of truth (read-write)"
     "nautobot|Source of Truth|Nautobot|IPAM — IPs, prefixes, VRF/tenant/site (5 tools)"
     "nautobot-golden-config|Source of Truth|Nautobot Golden Config|Golden-config compliance job runner for Nautobot"
@@ -70,6 +73,7 @@ CATALOG=(
     "zabbix|Observability|Zabbix SNMP-Poller NMS|Polled metric history, problems and device availability from a self-hosted Zabbix. Read-only. Answers what something WAS doing over time — the layer NetClaw had no source for"
     "bgp-intel|Observability|BGP & Registry Intelligence|RPKI origin validation, RDAP ownership, PeeringDB peering, routing visibility (public APIs, no credentials)"
     "globalping|Observability|Globalping|Outside-in measurement from ~4800 global probes — ping, traceroute, DNS, MTR, HTTP (remote, no install)"
+    "topolograph|Observability|Topolograph|OSPF/IS-IS link-state and BGP topology analysis — shortest/backup path, edge/node failure simulation, MPLS-TE/CSPF, event timeline, BGP sessions/routes/VRF inventory (remote HTTP, read-only, no install)"
     "telemetry-receivers|Observability|Telemetry Receivers|SNMP trap, syslog, IPFIX/NetFlow receivers over UDP (3 servers)"
     "auvik|Observability|Auvik|Read-only network monitoring — inventory, alerts, lifecycle, performance (bundled, 20 tools)"
 
@@ -101,12 +105,15 @@ CATALOG=(
     "blender|Analysis & Diagrams|Blender 3D|3D network topology rendering (requires Blender)"
     "ue5|Analysis & Diagrams|Unreal Engine 5|3D digital twin (requires UE5.8+ with MCP plugin)"
     "threejs-viz|Analysis & Diagrams|Three.js Network Viz|Browser-based 3D topology, no desktop app/GPU (optional Sketchfab real-stencil mode)"
+    "comfyui-viz|Analysis & Diagrams|ComfyUI Topology Visualization|AI-generated stylized topology stills via a self-hosted ComfyUI instance"
+    "worldlabs-marble|Analysis & Diagrams|World Labs Fantastical Topology Viz|Free themed prompt preview + (credits-spending, confirmation-gated) explorable 3D world generation via World Labs Marble (spec 122)"
     "chrome-devtools|Analysis & Diagrams|Chrome DevTools|Browser automation/inspection — visualization QA, controller GUI gap-fill, API discovery, Watch Mode (2 servers)"
     "computer-use|Analysis & Diagrams|Computer Use|Full-desktop automation for API-less/browser-less targets — Xvfb+XFCE virtual desktop, 17 actions, VNC Watch Mode (via ClawHub)"
 
     "tts|Voice & Social|Text-to-Speech|edge-tts voice replies for Slack/WebEx (2 tools)"
     "twitter|Voice & Social|Twitter/X|Tweet posting, threads, heartbeat (bundled)"
     "twilio|Voice & Social|Twilio|Core API (SMS/messaging) plus bidirectional voice calls, emergency alerts (2 servers)"
+    "zoom-rtms|Voice & Social|Zoom Meeting Intelligence|Realtime Media Streams meeting listener, live investigation routing, Zoom App panel + camera-overlay avatar (spec 118, 9 tools)"
 
     "gait|Platform Services|GAIT Audit Trail|Git-based AI audit trail (recommended for all installs)"
     "mempalace|Platform Services|MemPalace Memory|Local AI memory — 19 tools, no API keys"
@@ -152,7 +159,7 @@ PROFILE_CISCO="pyats gait netbox servicenow aci ise catc meraki sdwan cml fmc \
 radkit te-community te-official nvd-cve cisco-psirt subnet-calc drawio-rfc uml packet-buddy"
 
 PROFILE_MULTIVENDOR="pyats junos anta arista-cvp aruba-cx f5 fortinet multivendor-cli netbox nautobot gait servicenow \
-fwrule subnet-calc drawio-rfc uml packet-buddy"
+fwrule subnet-calc drawio-rfc uml packet-buddy percepxion slc topolograph"
 
 PROFILE_CLOUD="aws azure gcp cloudflare terraform vault github gait drawio-rfc uml subnet-calc"
 

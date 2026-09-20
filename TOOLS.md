@@ -66,6 +66,8 @@ All credentials are in `~/.openclaw/.env`. Never put credentials in skill files 
 - Cisco PSIRT MCP     → CISCO_CLIENT_ID, CISCO_CLIENT_SECRET (OAuth2 client-credentials via id.cisco.com), CISCO_PSIRT_CACHE_DIR, CISCO_PSIRT_CACHE_TTL_S (default 21600)
 - Globalping MCP      → GLOBALPING_TOKEN (bearer, remote endpoint mcp.globalping.dev; 401 without it)
 - Cisco Meraki MCP    → MERAKI_DASHBOARD_API_KEY (read-only Dashboard administrator; Cisco-hosted MCP at mcp.meraki.com)
+- Topolograph MCP     → TOPOLOGRAPH_API_TOKEN (bearer), TOPOLOGRAPH_MCP_URL (optional, overrides the default hosted endpoint); remote HTTP, read-only, 401 without the token
+- Zoom RTMS MCP       → ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET, ZOOM_ACCOUNT_ID, ZOOM_RTMS_WEBHOOK_SECRET, N2N_ZOOM_CHANNEL_PORT, N2N_ZOOM_CHANNEL_SECRET (see docs/ZOOM-MEETING-INTELLIGENCE.md, spec 118)
 ```
 
 ## Detailed Per-Integration Notes
@@ -239,6 +241,88 @@ The Sketchfab MCP server ([gregkop/sketchfab-mcp-server](https://github.com/greg
 - Not every downloadable model has a ready-made glTF/GLB export — `sketchfab-download` silently substitutes a different format (source/gltf/usdz) when the requested `glb` isn't available for that specific model; callers must check the tool's response text for the exact "in glb format." success phrasing rather than assuming success means the requested format was honored.
 - In practice, CC0-licensed models specific to network equipment are essentially nonexistent on Sketchfab — confirmed via live searches during development ("router", "server rack", "electronic box" all returned zero or irrelevant CC0 results). Procedural-shape fallback in `threejs-network-viz` is the expected common case, not a rare edge case.
 
+## ComfyUI MCP Server
+
+The ComfyUI MCP server ([shawnrushefsky/comfyui-mcp](https://github.com/shawnrushefsky/comfyui-mcp), cloned at install time — not vendored/committed — into `mcp-servers/comfyui-mcp/`) is the AI image-generation backend for `workspace/skills/comfyui-topology-viz/` (120-comfyui-topology-viz) — it is not used by any other skill.
+
+- **Tools used (6 of 41)**: `get_status` (reachability), `list_models` (checkpoint discovery), `search_templates`/`get_template` (built-in text-to-image workflow selection), `run_workflow` (async submission), `get_task_result` (polling to a ComfyUI-reported terminal state). The full server exposes 41 tools across setup/templates/generation/composition/discovery/queue-management/memory/preferences categories; this skill deliberately uses only the discovery+template+async-submission path, not raw workflow-graph authorship.
+- Transport: stdio (Node.js), registered as `comfyui-mcp` in `config/openclaw.json`
+- Requires: `COMFYUI_URL` — the endpoint of a separately-running ComfyUI instance (this server does not install or manage ComfyUI itself). No API key of its own.
+- Install: `cd mcp-servers/comfyui-mcp && npm install && npm run build` (produces `dist/index.js`, the file `config/openclaw.json` points at)
+- **Real behavior found live during 120's implementation, not documented upstream**: if the configured `COMFYUI_URL` cannot be reached, `comfyui-mcp` does **not** report a failure — it silently falls back to port-scanning common local ports (`discoverySource: "port-scan"` in its `get_status` response) and connects to *whatever* ComfyUI it finds there instead, even for a completely non-routable configured host. `comfyui_client.py` in `comfyui-topology-viz` guards against this by comparing the response's `comfyuiUrl`/`discoverySource` against what was actually configured and treating a mismatch as unreachable — never trust `comfyuiConnected: true` alone as proof the *configured* endpoint was used.
+- `list_models({"type": "checkpoints"})` returns `{"checkpoints": [...]}`; calling with `{"type": "all"}` instead **omits empty categories from the response entirely** (a `checkpoints` key won't even be present if none are installed) — always request the specific type you need rather than parsing `"all"`.
+- `run_workflow`'s `workflow` parameter requires a full ComfyUI workflow JSON (API format) — it does not accept a bare text prompt. Use `search_templates(taskType="txt2img")` → `get_template(templateId, parameters={prompt, checkpoint, ...})` to get a populated workflow without authoring raw node graphs.
+- `npm audit` on the built server reports 10 vulnerabilities (1 low, 2 moderate, 7 high) in transitive dependencies (`hono`, `path-to-regexp`, `qs`, `sharp`, `ws`) used for the server's own internal HTTP/media handling, not this skill's stdio-only usage — tracked non-blocking, same treatment as `sketchfab-mcp-server`'s own audit findings. Do not run `npm audit fix --force` without testing afterward — it force-upgrades `sharp` with a breaking change.
+
+## topology-diagram-mcp / image-style-mcp (spec 121 federated topology viz)
+
+Two new NetClaw-authored MCP servers, together spec 121's federated two-stage pipeline for
+`comfyui-topology-viz` — same skill entry point as spec 120's `comfyui-mcp`-based path above, now
+tried first when a live topology source is available, with spec 120's original path as the
+automatic fallback (`generation_path` in the response says which was used). Neither server is
+usable standalone; both run on the `johns-risk/viz` federation member, invoked from Border via
+`n2n/tools/call` (never in-process on Border — FR-005). See
+`specs/121-federated-topology-viz/research.md` for the full design.
+
+- **`topology-diagram-mcp`** (Stage A): one tool, `render_structural(snapshot_id, devices, links)`
+  → `{image_base64, format, positions, device_count}`. Deterministic — networkx (Kamada-Kawai
+  layout) + Pillow (drawing), procedural per-role icon shapes (circle=router, port-ticked
+  rect=switch, brick-hatched rect=firewall, diamond=load_balancer, monitor glyph=client). No
+  diffusion model, no external CLI. The original design called for N2G → draw.io XML → the draw.io
+  desktop CLI; that path doesn't work headlessly on this host (no `drawio` CLI anywhere, `graphviz`'s
+  system package needs interactive `sudo` this environment doesn't have) — research.md R3a.
+- **`image-style-mcp`** (Stage B): one tool, `style_image(image_base64, style_prompt,
+  negative_prompt)` → `{styled_image_base64, format}`. Talks to ComfyUI **directly via REST**
+  (`/prompt`, `/history/{id}`, `/view`, `/upload/image`) — not through `comfyui-mcp`'s task
+  tracker, confirmed broken in spec 120 (see the ComfyUI MCP Server section above). Runs an
+  image-edit workflow (Qwen-Image-Edit-2509 GGUF, `UnetLoaderGGUF` + `CLIPLoader` +
+  `TextEncodeQwenImageEdit` + `ReferenceLatent`, `denoise≈0.5` — structure-preserving, never a
+  fresh txt2img generation) so restyling can't drift the diagram's structure (FR-003). Model
+  weights (Q4_K_M unet 13.1GB, fp8-scaled text encoder 9.4GB, VAE 254MB — verified real sizes at
+  the HuggingFace source, Apache-2.0, ungated) live on the ComfyUI Windows host at
+  `models/unet/`, `models/text_encoders/`, `models/vae/` respectively.
+- **A real, previously-unexercised gap in the shared federation infrastructure had to be fixed to
+  make internal `n2n/tools/call` work at all** — four separate issues in `bgp/federation/{service,
+  invocation,authorization}.py` (missing dispatch entry, missing attestation elevation, eN2N-only
+  channel resolution, eN2N-only `is_federated` gate). All additive/backward-compatible, live-verified
+  end to end against the real `johns-risk/viz` member. See research.md R10 for the full account —
+  this was the first working internal `n2n/tools/call` in NetClaw's history.
+
+## worldlabs-marble-mcp (spec 122 fantastical topology viz)
+
+One new NetClaw-authored MCP server, a thin fully stateless proxy to three World Labs Marble REST
+endpoints, backing `workspace/skills/worldlabs-topology-viz/`. Unlike spec 121's pair above, this
+runs standalone on Border — no federation member required. See
+`specs/122-worldlabs-topology-viz/research.md` and `contracts/worldlabs-marble-mcp.md` for the full
+design.
+
+- **`generate_world(image_base64, text_prompt, display_name, user_confirmed, image_extension="png", model="marble-1.1")`**
+  — the one credit-spending operation. Passes the reference PNG inline via Marble's
+  `data_base64` image-reference source (no separate upload round trip — research.md R1). Requires
+  `user_confirmed=true`; a missing/false value is rejected with `confirmation_required` before any
+  request reaches World Labs (FR-016, research.md R8) — a code-level guard *in addition to* the
+  conversational confirmation the skill also requires.
+- **`check_generation_status(operation_id)`** — polls a started generation; a 404 maps to
+  `not_found_or_expired` (operation records carry roughly a one-hour `expires_at`).
+- **`get_world(world_id)`** — durable, no-cost fallback lookup for when an operation record has
+  expired but the world it produced has not (research.md R4); a 404 here maps to `not_found`
+  instead, since a world either exists or it doesn't.
+- Every non-200 response is normalized into one of five categories (`authentication_failure`,
+  `insufficient_credits`, `rate_limited`, `not_found_or_expired`/`not_found`, `generic_failure`) —
+  never the raw provider error object, and the `WLT_API_KEY` value is read fresh from the
+  environment on every call, never logged, never echoed in a result (FR-010).
+- **Explicitly decorative, not authoritative**: every preview and generation result the skill
+  produces carries a fixed statement (`topology_model.DECORATIVE_LABEL`) that the generated world
+  is an artistic interpretation, not an accurate diagram — the real, structurally-correct diagram
+  (from the existing, unmodified `topology-diagram-mcp/render_structural`) remains the source of
+  truth. Confirmed generation attempts are recorded in the existing GAIT audit trail
+  (`gait_record_turn`, Constitution Principle IV) — not a new store, and not optional (FR-015).
+- **Real-world finding, not documented upstream**: a freshly-created, funded World Labs API key can
+  return a bare HTTP 401 with no further detail — this was a platform-side propagation delay/issue,
+  not a client-side mistake (verified by reproducing the exact documented quickstart request
+  byte-for-byte and still getting 401, then confirming a newly-rotated key worked immediately).
+  Don't assume a 401 from a just-created key means the key or the request is wrong.
+
 ## Claroty xDome MCP Server
 
 The Claroty xDome MCP server provides 21 tools (15 read-only + 6 ITSM-gated writes) for OT / IoT / IoMT visibility via stdio transport:
@@ -289,6 +373,56 @@ hosts none. Only ~1,390 of the internet's ASNs host a probe.
 **Privacy note**: every tool requires a natural-language `context` field the vendor uses for intent
 analytics. NetClaw sends a generic, task-shaped value with no customer name, internal hostname, ticket or
 topology detail. `limits` output echoes a short token fragment — don't paste it into a public channel.
+
+## Topolograph IGP Topology Analysis (`topolograph-mcp`, remote)
+
+Link-state reasoning over the **whole area's LSDB** from a stored Topolograph snapshot — the layer
+that sees the topology as a graph, not one device's routing table. Remote HTTP against the operator's
+own Topolograph instance; no local server.
+
+| Tool | Purpose |
+|---|---|
+| `get_all_graphs` | List stored snapshots (protocol/area/date filters) — get a `graph_time` |
+| `get_graph_by_time` / `get_graph_status` | Full graph for a snapshot; completeness/health of it |
+| `get_nodes` / `get_edges` | Routers (ABR/ASBR, IS-IS overload/attached flags) and adjacencies (MPLS-TE fields via `include=`) |
+| `get_network_by_graph_time` / `get_lsps` | Prefixes in the graph; MPLS-TE LSP tunnels |
+| `get_shortest_path` / `get_cspf_path` | SPF path (optionally accounting for autoroute tunnels); constrained-SPF feasibility |
+| `get_edge_failure_reaction` | Whole-network impact of one or more link failures — simulation only |
+| `get_network_events` / `get_adjacency_events` / `get_events_timeline` | Topology-change events, raw or grouped into waves |
+
+**Read-only, enforced upstream**: the server runs `TOPOLOGRAPH_MCP_READ_ONLY=true`, so `upload_graph`
+and the `*_lsp` mutation tools are not in `tools/list`. NetClaw scopes the surface further with
+`defenseclaw tool allow topolograph-mcp <tool>` (the `get_*` tools) and blocks the rest.
+
+**Snapshot, not the wire**: results describe a stored graph and, for `get_edge_failure_reaction` /
+`get_cspf_path`, a prediction. Confirm on the device when the question is "is this true right now",
+and always report how old the `graph_time` is.
+
+## Topolograph BGP Topology Analysis (`topolograph-mcp`, remote)
+
+Same server and credential as the IGP tools above — BGP speakers, sessions, route table, and
+VRF/VPN inventory from Topolograph's BMP-fed BGP topology. **Requires Topolograph >= 2.69.1** and
+`topolograph-mcp-server >= v1.3.0` — an older server lists these tools but every call 404s or
+returns empty.
+
+| Tool | Purpose |
+|---|---|
+| `list_bgp_graphs` / `get_bgp_graph` | List BGP epochs (BMP collection cycles) — get a `bgp_graph_time` |
+| `list_bgp_nodes` / `list_bgp_sessions` | BGP speakers and peering sessions of an epoch (eBGP/iBGP, families, IGP relation) |
+| `search_bgp_routes` | Route table search, whole-graph or scoped to one speaker's resolved RIB view |
+| `get_bgp_node_route_summary` / `get_bgp_route_state` | Per-speaker route totals by RIB tag; point-in-time route state |
+| `compare_bgp_routes` / `get_bgp_events_timeline` | Route diff between two instants; BGP session/route monitoring events |
+| `list_bgp_bindings` / `get_bgp_binding` | Whether a BGP epoch's speakers match a stored IGP graph, and how confidently |
+| `resolve_route` | End-to-end destination resolution across a BGP/VPN/MPLS handoff, not just IGP SPF |
+| `get_vrf_inventory` / `list_vpn_routers` | VRF names/RDs/route-targets per router; VPN-PE candidates for `resolve_route` |
+
+**Read-only, same enforcement as the IGP tools**: none of the 14 mutate; scoped client-side with
+`defenseclaw tool allow topolograph-mcp <tool>`.
+
+**Empty is not "no BGP data"**: every one of these tools silently returned empty on Topolograph
+instances predating the v2.69.1/v2.69.2 auth fix (12 `/bgp-graph*` endpoints ran with no security
+scheme, so a valid bearer token was never even checked). If every call comes back empty, confirm the
+Topolograph version before concluding there is no BGP monitoring configured.
 
 ## Cisco PSIRT Advisories (`cisco-psirt-mcp`)
 
@@ -792,3 +926,44 @@ reports discovery · `devnet-catalyst-search` reads docs, this queries an applia
   `AGENT_CONTROL_ENABLED=true` and validate a safe pre-stage call before
   relying on controls. This hook does not intercept upstream OpenClaw MCP tool
   calls before execution.
+
+## Lantronix Percepxion + SLC, out-of-band console management (`percepxion-mcp-server`, `slc-mcp-server`)
+
+**Spec 104.** Two external, actively co-developed Lantronix repos, not vendored, not registered in
+`config/openclaw.json`, external/on-demand install (dedicated venv per server, see
+`component_install_percepxion`/`component_install_slc` in `scripts/lib/install-steps.sh`). 37 tools each.
+Full install steps, environment variables, and workflows in `workspace/skills/percepxion-oob/SKILL.md`.
+
+| Server | Repository | Answers |
+|---|---|---|
+| `percepxion-mcp-server` | [Lantronix/percepxion-mcp-server](https://github.com/Lantronix/percepxion-mcp-server) | Fleet-wide, async — firmware compliance across many devices, bulk config push, security audit, CLI dispatch through the cloud (job group create, poll, then `get_cli_command_output` for text) |
+| `slc-mcp-server` | [Lantronix/slc-mcp-server](https://github.com/Lantronix/slc-mcp-server) | One device, sync — direct port status, session management, CLI output with no polling, cellular status |
+
+### Why two servers, not one
+
+They're not redundant — the highest-value content is the routing rule between them. Percepxion has no
+single-device sync path; slc-mcp-server has no fleet concept. A device reachable only through Percepxion's
+cloud path has no direct-network alternative via slc-mcp-server, and vice versa for a device with no cloud
+enrollment. The skill's "Key Terms" and "CLI Command Routing" sections encode this as tool-routing rules.
+
+### Behaviour worth knowing
+
+- **`get_job_group` never returns CLI command output text** — only job status and metadata. A live root-cause
+  finding (pre-v1.1.0) traced actual output retrieval to a second, undocumented REST call
+  (`POST /v1/telemetry/result/search`), absent from Percepxion's own OpenAPI spec. Shipped as
+  `get_cli_command_output` in `percepxion-mcp-server` v1.1.0.
+- **Percepxion's `organization_id` requirement is role-dependent.** Required for Project Admin sessions on
+  job/telemetry/content/Smart-Group/audit calls; optional (auto-scoped) for Tenant Admin/Tenant User.
+  Omitting it as a Project Admin previously surfaced as an opaque `400 ACCESS_DENIED: "Invalid access to
+  tenant."`; v1.1.0+ raises a clear error naming the missing parameter instead.
+- **"OOB device" and "managed device" are not the same identity space.** The OOB device is the Lantronix
+  console server; the managed device is the router/switch/firewall cabled to its serial port. Confusing the
+  two sends a command to the wrong hardware, not a soft error.
+- Both servers pin `fastmcp>=3.1.0,<4.0`, the same conflict shape as `zabbix-mcp` (five NetClaw servers pin
+  `fastmcp<3`), hence the dedicated venv rather than the shared installer interpreter.
+
+### Boundaries
+
+`redfish-mcp` reads BMC/hardware health on a server chassis, this reads OOB console-server/managed-device
+state — disjoint hardware classes · neither `pyats` nor `multivendor-cli` reaches a device through a serial
+console port, this closes that gap when the primary network path is down.

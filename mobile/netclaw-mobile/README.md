@@ -339,7 +339,14 @@ Border, not a dependency.
   `main.dart`'s `_tryRegisterPush()` swallows the resulting failure to a
   `debugPrint`, so **push silently does nothing rather than erroring** until those
   credentials exist. Notification-tap deep-linking is wired on the same success
-  path: it jumps to the Feed tab and highlights the referenced message.
+  path: it jumps to the Feed tab and highlights the referenced message. Since
+  spec 107 that works even when the message has not arrived yet — the tap records
+  a `PendingOpenIntent` (`lib/ncfed/pending_open_intent.dart`) which resolves when
+  the message lands, or gives up after 8s. Foreground pushes are also recorded
+  straight from their data payload (`lib/ncfed/push_message_ingest.dart`), so a
+  pushed message is readable without a live channel; `MessageFeedStore.append`
+  deduplicates on `pushed_at`, which is what stops that path and the Border's
+  replay from each storing their own copy.
 - Voice transcription (`speech_to_text`, feature 067 US4) and the device deep link
   (`app_links`, feature 067 US5) are wired in and pass their unit tests, but — like
   push notifications — haven't been exercised against a real microphone or a real
@@ -355,3 +362,231 @@ Border, not a dependency.
   BiometricPrompt need no key at all) — added to `Info.plist` alongside the
   existing camera/microphone keys, which now also cover the `camera` package's
   photo/video capture use (not exercised on iOS, same Xcode/Mac caveat as above).
+- **1.0.1 polish pass** (spec `109-mobile-polish-pass`, 2026-08-15, version bumped
+  `1.0.0+1` → `1.0.1+2`): dark mode (a proper dark `ColorScheme`, `themeMode:
+  ThemeMode.system`, a repo-hygiene test locking the color-literal sweep in going
+  forward), selectable/copyable/shareable Markdown-or-preformatted rendering for
+  chat answers and Feed messages (`flutter_markdown_plus` — `flutter_markdown` is
+  confirmed discontinued by its own publisher), Time Sensitive approval
+  notifications, an operator-adjustable Face ID app-lock gate wrapping the entire
+  app root, haptic feedback on six key events (phone + watch), live search/filter
+  across Chat and Feed, and a fix for the Dashboard's "Unread"/"Pending approvals"
+  rows previously doing nothing on tap.
+  - **Verified**: everything above via the automated suite — `flutter analyze`
+    clean, full `flutter test` suite passing (360/360, zero regressions, zero
+    skipped tests) — consistent with this spec's own scoping to avoid anything
+    that could only be proven on a physical device.
+  - **Verified via `xcodebuild`, not on real hardware**: the watch-side haptic
+    additions (`ApprovalsView.swift`/`WatchDataStore.swift`) compile cleanly
+    (`xcodebuild -workspace Runner.xcworkspace -scheme WatchApp -sdk
+    watchsimulator` → `BUILD SUCCEEDED`, both before and after the changes).
+    Whether they actually *feel* right on a wrist has not been checked.
+  - **Not verified — needs a physical device**: (1) the long-answer
+    scroll-performance scenario (profiling a ~5000-character answer for dropped
+    frames) — Clarifications (2026-08-14) scoped this to a manual/qualitative
+    check specifically because it cannot be proven by `flutter test`, and no
+    device pass has happened yet; (2) Time Sensitive delivery actually
+    surviving a real Focus mode (iOS Focus modes have no meaningful Simulator
+    equivalent); (3) the Face ID app-lock's actual biometric prompts — every
+    automated test exercises the injected `authenticate` fake, never
+    `local_auth`'s real platform channel; (4) all six phone-side haptics'
+    actual feel, same caveat as approvals confirmation/device-removal haptics
+    elsewhere in this document.
+  - One behavior change worth calling out explicitly rather than letting it be
+    discovered later: with app-lock enabled, an approval notification's
+    Approve/Deny action can no longer resolve until the app itself is
+    unlocked, because `HomeShell` — where the notification-response handler is
+    wired — does not mount at all until `AppLockGate` authenticates. This is
+    the intended, more conservative posture (a locked phone should not be able
+    to approve a network change), not a regression, but it is a real change in
+    what "tap Approve from the lock screen" does once app-lock is turned on.
+- **Siri / App Intents (B1a)** (spec `111-siri-app-intents`, 2026-08-15): three
+  native `AppIntent`s — `AskBorderIntent` ("Hey Siri, ask NetClaw [question]",
+  headless submit + spoken acknowledgment, real answer arrives later as a
+  local notification), `PendingApprovalsIntent`, and `BorderHealthIntent` —
+  exposed via one `AppShortcutsProvider` (Siri, the iPhone 15 Pro+ Action
+  Button, and Shortcuts automations, with zero manual setup). Each launches a
+  headless `FlutterEngine` (the same pattern spec 099's background refresh
+  established) rather than opening the app. `PendingApprovalsIntent` required
+  one new, narrowly-scoped Border-side RPC (`n2n/edge/approvals_list`) since
+  no existing passive/cached source could give a live count without
+  under-counting (research.md R3); `BorderHealthIntent` needed zero Border
+  changes, since "Border health" in this app has always been a passively
+  cached on-device value, not a request/response query (research.md R4).
+  - **Verified**: `flutter analyze` clean, full `flutter test` suite passing
+    (378/378, zero regressions), the new `tests/n2n/
+    test_edge_approvals_list.py` (3/3), the full `tests/n2n` suite
+    unaffected (455 passed, the same 14 pre-existing environment-only
+    failures — missing `chromadb`, a Python-version-dependent
+    `OSError`/`ConnectionRefusedError` string check — present and unaffected
+    both before and after this change), **and a full `xcodebuild -workspace
+    Runner.xcworkspace -scheme Runner -sdk iphoneos -configuration Debug
+    build CODE_SIGNING_ALLOWED=NO` → `BUILD SUCCEEDED`**, compiling and
+    linking all three new `AppIntent`s and the `AppShortcutsProvider` into
+    `Runner.app` with zero warnings in any of the five new Swift files. The
+    first `xcodebuild` attempt during this spec failed on a **stale**
+    `ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/
+    Package.swift` — regenerated with a hardcoded iOS 13 platform floor
+    instead of picking up `AppFrameworkInfo.plist`'s `MinimumOSVersion` 16.2
+    (the actual fix, already correctly in place, documented in spec 099's own
+    blog post). `flutter pub get` alone does not regenerate this file
+    correctly; `flutter build ios --config-only --debug` does. Worth noting
+    for future specs hitting the same class of failure spec 110 also
+    reported: it is a stale-cache artifact, not a genuine unfixable
+    limitation — re-running the config-only build resolves it.
+  - **Not verified — needs a physical device**: everything Siri/Action-
+    Button/Shortcuts-specific in this spec is 🔌 DEVICE-only per its own
+    spec.md — real voice invocation, the spoken acknowledgment timing, the
+    real-answer notification actually arriving, `ProcessInfo.
+    performExpiringActivity`'s actual granted runtime (`AskBorderIntent.
+    swift`'s best-effort post-acknowledgment window, research.md R8 — the
+    requested 25s budget is a request, not a guarantee, and its real-world
+    value is unverified), and the Border-unreachable/not-enrolled spoken
+    failure paths for all three intents.
+- **Watch Double Tap + corner complication (B4+B5)** (spec
+  `112-watch-double-tap-complication`, 2026-08-15): Double Tap on a Series
+  9/Ultra 2-or-later watch now triggers the topmost pending approval's
+  existing, passcode-gated "Approve" action (never a separate, less-gated
+  path — it invokes the identical `Button.action` closure a manual tap
+  already uses) and, separately, the "Read aloud" button in the Ask view.
+  Both `HeartbeatComplication` and `PendingApprovalComplication` gained
+  `.accessoryCorner` support for Infograph watch faces, reusing their
+  existing views unchanged. No deployment-target change (Double Tap is
+  gated by `if #available(watchOS 11.0, *)`, keeping the 10.0 floor intact
+  for older watches, FR-006) and no new Xcode target or entitlement (FR-009).
+  - **Verified**: `flutter analyze` clean, full `flutter test` suite passing
+    (378/378, zero regressions — this spec touches no Dart code at all), and
+    `xcodebuild -workspace Runner.xcworkspace -scheme WatchApp -sdk
+    watchsimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO` →
+    `BUILD SUCCEEDED`, which embeds and builds `WatchComplication.appex` as
+    part of the same scheme (confirming both targets in one build). The four
+    modified Swift files parse cleanly via `swiftc -parse` with zero syntax
+    errors.
+  - **Note on verification method**: a standalone `xcodebuild -scheme
+    WatchComplication -sdk watchsimulator` invocation was deliberately not
+    used to verify B5 — confirmed via `git stash` that it fails on
+    completely unmodified code too, hitting the exact "cross-SDK build trap"
+    already documented above for spec 072 (`-sdk` as a blunt flag forces
+    every workspace target, including phone-only plugins like
+    `mobile_scanner`/`local_auth_darwin` with no watchOS platform support at
+    all, onto the watch SDK). The `WatchApp` scheme's build, which correctly
+    embeds `WatchComplication.appex`, is the accurate verification vehicle.
+  - **Not verified — needs a physical device**: everything in this spec is
+    🔌 DEVICE-only per its own spec.md — a real Double Tap gesture (a
+    hardware-gated system gesture with no Simulator equivalent), and real
+    corner-slot placement/legibility on an actual Infograph watch face.
+    Also unverified: backwards-compatibility behavior on a pre-Series-9
+    watch or a Series 9/Ultra 2 watch running below watchOS 11 (FR-004) —
+    no such device was available during this pass.
+- **Interactive and in-flight Live Activity (B3)** (spec
+  `113-live-activity-interactive-inflight`, 2026-08-15): the pending-approval
+  Live Activity gained Approve/Deny buttons (iOS 17+, `Button(intent:
+  ApprovalActionIntent())`) that foreground the app to Approvals — never
+  resolving anything directly, since a `LiveActivityIntent` cannot reliably
+  present the existing biometric/passcode confirmation from the background,
+  and this spec deliberately does not weaken that spec-073 invariant to make
+  the button "work." The activity also now dismisses correctly when resolved
+  from any surface (in-app, notification, watch), not just a tap on the
+  activity itself. Separately, a brand-new in-flight query Live Activity
+  starts per submitted question, showing the question and a live elapsed
+  timer, updated with the Border's own free-text progress detail — research
+  performed before writing this spec found the brief's original
+  `respondedMembers`/`expectedMembers` design describes a concept that
+  doesn't exist in the Border's actual sequential-delegation model (a
+  submitted ask is one agent turn discovering delegated members one at a
+  time, confirmed against a real captured trace), so this spec deliberately
+  narrowed scope to what the system genuinely knows rather than fabricate a
+  member count.
+  - **Verified**: `flutter analyze` clean, full `flutter test` suite passing
+    (397/397, zero regressions), including new coverage for
+    `live_activity.dart`'s start/update/end/startAsk/updateAsk/endAsk call
+    sequencing against a fake `MethodChannel` and the new
+    `netclaw://approvals`/`netclaw://chat/<taskId>` deep-link parsers. A full
+    `xcodebuild -workspace Runner.xcworkspace -scheme Runner -sdk iphoneos`
+    → `BUILD SUCCEEDED`, compiling the three new Swift files
+    (`ApprovalActionIntent.swift`, `AskActivityAttributes.swift`,
+    `AskLiveActivityView.swift`) into their correct target(s) alongside the
+    existing `LiveActivityWidget` extension.
+  - **A real dual-Xcode-target-membership mistake was caught by the build,
+    not assumed correct**: `ApprovalActionIntent.swift` was first added
+    `Runner`-only (reasoning it only foregrounds the app), but
+    `PendingApprovalLiveActivityView.swift`'s `Button(intent:
+    ApprovalActionIntent())` calls are compiled *into* the
+    `LiveActivityWidget` extension target, which therefore needs the
+    concrete type too — `xcodebuild` failed with `cannot find
+    'ApprovalActionIntent' in scope` until fixed. Fixing that, in turn,
+    surfaced a second real problem: `UIApplication.shared` (used to open the
+    `netclaw://approvals` deep link) is unavailable in application
+    extensions, so the same file failed to compile a second way once
+    dual-membered. Fixed with a custom `IS_EXTENSION_TARGET`
+    `SWIFT_ACTIVE_COMPILATION_CONDITIONS` flag on the `LiveActivityWidget`
+    target and an `#if !IS_EXTENSION_TARGET` guard around that one call —
+    the extension's copy of `perform()` never actually executes at runtime
+    anyway (`openAppWhenRun` always dispatches execution into the app
+    process), so this is provably safe, not a workaround masking a real gap.
+    Neither problem was caught by `swiftc -parse`/SourceKit single-file
+    checks — only a real, full `xcodebuild` run found either, reinforcing
+    why this spec's own quickstart.md treats that as mandatory before
+    calling any Swift-side task done.
+  - **Not verified — needs a physical device**: everything Live-Activity-
+    rendering-specific in this spec is 🔌 DEVICE-only per its own spec.md —
+    the real interactive Lock Screen button and its foreground behavior, the
+    activity dismissing correctly when resolved elsewhere, the in-flight
+    activity's real ticking timer and Dynamic Island rendering, and its
+    `staleDate` actually taking effect on a genuinely abandoned ask (a
+    ~780-second wait, impractical to sit through in one verification pass —
+    verified by code review instead that the value mirrors the Border's own
+    ask-timeout ceiling, not an arbitrary guess).
+- **Home screen, Lock Screen, and Control Center widgets (B1b+B2)** (spec
+  `114-widgets-controlwidget`, 2026-08-15, iOS 18+ only — the operator
+  explicitly authorized dropping pre-iOS-18 support for this one target):
+  a new `NetClawWidgetExtension` target (created by the operator via Xcode's
+  own Widget Extension wizard, registered with a new phone-only App Group,
+  `group.ca.automateyournetwork.netclaw.mobile.ios`) now shows Border
+  health, pending-approval count, and the last heartbeat's age — on the home
+  screen (small/medium), the Lock Screen (`.accessoryCircular`/
+  `.accessoryRectangular`/`.accessoryInline`), and Control Center. Every
+  reading is explicitly timestamped, never implied live; no widget shows any
+  per-approval detail, matching the existing Live Activity's identical
+  restriction. Tapping any widget deep-links via the same `netclaw://`
+  mechanism specs 111/113 already established.
+  - **A real, two-part target-setup defect was found and fixed before any
+    feature code was written**, caught by a full `xcodebuild` run, not
+    assumed correct from the operator's own Xcode wizard output: the new
+    target had been embedded under `WatchApp` instead of `Runner` (wrong
+    bundle identifier, `ca.automateyournetwork.netclaw.mobile.watchapp
+    .NetClawWidget`; wrong, old watch-only App Group in its own
+    entitlements; `TARGETED_DEVICE_FAMILY = 4`, the Watch code, instead of
+    `1,2` for iPhone/iPad). Fixed via the `xcodeproj` gem: moved the target
+    dependency and embed-phase reference from `WatchApp` to `Runner`,
+    corrected the bundle identifier to
+    `ca.automateyournetwork.netclaw.mobile.netclawwidget`, corrected the
+    entitlements to the new phone App Group, and corrected the device
+    family. Xcode's own default `ControlWidget` template code also required
+    iOS 18 (`buildExpression`) while inheriting the project's 16.2 floor —
+    fixed by setting the new target's own deployment target to 18.0,
+    explicitly authorized by the operator for this target only (`Runner`'s
+    and `WatchApp`'s own floors are unchanged).
+  - **The brief's own Control Center design was corrected during planning,
+    before implementation**: the source brief described tapping the control
+    as invoking `AskBorderIntent` directly, but that intent requires a
+    `question: String` parameter Control Center has no text-entry surface to
+    collect. The control instead shows the cached pending count and, on tap,
+    foregrounds Chat ready to type — reusing the exact `openAppWhenRun` +
+    `netclaw://` pattern spec 113's Approve/Deny buttons already
+    established, including the same `IS_EXTENSION_TARGET` compile-guard
+    technique for its own `UIApplication.shared` call (also newly applied to
+    the `NetClawWidgetExtension` target, which didn't have that flag yet).
+  - **Verified**: `flutter analyze` clean, full `flutter test` suite passing
+    (408/408, zero regressions), including new coverage for
+    `widget_data.dart`'s mirror-call wiring and the two new
+    `netclaw://dashboard`/`netclaw://chat` deep-link parsers. A full
+    `xcodebuild -workspace Runner.xcworkspace -scheme Runner -sdk iphoneos`
+    → `BUILD SUCCEEDED`, zero warnings anywhere in the new/changed files,
+    compiling all of `NetClawWidget.swift`/`NetClawWidgetControl.swift`/
+    `AppIntent.swift`'s real content (no Xcode placeholder "favorite emoji"/
+    "timer" template code remains anywhere).
+  - **Not verified — needs a physical device**: everything in this spec is
+    🔌 DEVICE-only per its own spec.md — real widget placement and rendering
+    on an actual home screen/Lock Screen, real refresh timing under iOS's
+    own budget, and real Control Center interaction.

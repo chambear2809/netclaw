@@ -79,6 +79,17 @@ void main() {
     });
     addTearDown(() => dir.delete(recursive: true));
 
+    // 105/US1: a fresh install now sees the onboarding explainer before the
+    // scanner -- tap through it to reach the same screen this test always
+    // verified. The AI-data-sharing consent checkbox must be checked before
+    // Continue is enabled (5.1.1(i)/5.1.2(i)).
+    await tester.ensureVisible(find.byType(CheckboxListTile));
+    await tester.tap(find.byType(CheckboxListTile));
+    await tester.pump();
+    await tester.ensureVisible(find.text('Agree and Continue'));
+    await tester.tap(find.text('Agree and Continue'));
+    await tester.pump();
+
     expect(find.text('Scan Border QR Code'), findsOneWidget);
     // Must happen before this test function returns -- flutter_test's own
     // end-of-test invariant check runs before any tearDown()/addTearDown()

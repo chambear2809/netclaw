@@ -14,6 +14,7 @@ build/
 .venv/
 venv/
 env/
+.contract-test-envs/
 
 # Node
 node_modules/
@@ -109,6 +110,13 @@ mcp-servers/zabbix-mcp/.venv/
 # pulls cryptography 50.0.0 while the system holds 46.0.5 with four unbounded
 # dependents -- including the federation TLS stack.
 mcp-servers/anta-mcp/.venv/
+!mcp-servers/zoom-rtms-mcp/
+# Spec 118: NetClaw for Zoom -- Meeting Intelligence.
+!mcp-servers/topology-diagram-mcp/
+!mcp-servers/image-style-mcp/
+# Spec 121: federated topology viz Stage A/B, NetClaw-authored, not vendored.
+!mcp-servers/worldlabs-marble-mcp/
+# Spec 122: World Labs Marble fantastical topology viz, NetClaw-authored, not vendored.
 
 # Traces
 trace.json

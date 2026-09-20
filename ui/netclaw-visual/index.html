@@ -10,6 +10,11 @@
       href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <!-- Feature 101 FR-024 ("zero console errors") was the one criterion the HUD
+         failed, and only because no favicon was declared — the browser requests
+         /favicon.ico by default and got a 404 on every load. Pre-existing, cosmetic,
+         and it made an otherwise-clean console permanently non-empty. -->
+    <link rel="icon" type="image/png" href="/logos/netclaw.png" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
@@ -96,6 +101,7 @@
         <div class="footer-row">
           <span>Model <strong id="footer-model">--</strong></span>
           <span>Gateway <strong id="footer-gateway">--</strong></span>
+          <span>Budget <strong id="footer-budget" class="budget-indicator" title="Click to configure budget">--</strong></span>
           <span>Socket <strong id="footer-socket">CONNECTING</strong></span>
           <span>Updated <strong id="footer-updated">--</strong></span>
         </div>

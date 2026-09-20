@@ -168,6 +168,11 @@ class FederationService:
         # carry agent-member capabilities (no BGP/eN2N/inventory dispatch,
         # FR-012) and are addressed by push_to_edge(), not delegate_to_member().
         self.edge_channels: Dict[str, object] = {}
+        # Third delivery tier behind live-WS and platform push: a phone with no
+        # usable push transport (e.g. iOS without APNs credentials) would
+        # otherwise have every push silently dropped while it is backgrounded.
+        from .edge_queue import EdgeQueue
+        self.edge_queue = EdgeQueue(self.manager)
         self.border_channel = None                      # member side: our channel to the Border
         self.member_last_activity = time.time()         # member side: for cold/on-demand idle-exit
         self._spawning = set()                          # border side: members mid cold-start
@@ -192,6 +197,16 @@ class FederationService:
             "n2n/tasks/status": self.invoker.handle_task_status,
             "n2n/tasks/result": self.invoker.handle_task_result,
             "n2n/tasks/cancel": self.invoker.handle_task_cancel,
+            # spec 121: deterministic tool execution on a member (as opposed to
+            # agentic n2n/tasks/submit) had no dispatch entry at all — an inbound
+            # n2n/tools/call on an internal channel hit ERR_METHOD_NOT_FOUND
+            # unconditionally, regardless of grants. Reuses the same grant-gated
+            # Invoker.handle_tools_call already used for eN2N tool calls; see the
+            # matching attestation fix in dial_border() below (negotiate.allows()
+            # requires attestation=="possession", which an InternalChannel never
+            # set despite iN2N's pinned-key signed-nonce handshake actually being
+            # a possession proof).
+            "n2n/tools/call": self.invoker.handle_tools_call,
         }
         # feature 066: Border-side handlers for edge (phone) connections. Only
         # the handshake + built-in health methods (FR-012) — never BGP/eN2N/
@@ -213,6 +228,8 @@ class FederationService:
             # feature 068: biometric-gated approvals + capability advertisement.
             "n2n/edge/register_capabilities": self._edge_on_register_capabilities,
             "n2n/edge/approval_resolve": self._edge_on_approval_resolve,
+            # spec 111, US2: PendingApprovalsIntent's live count.
+            "n2n/edge/approvals_list": self._edge_on_approvals_list,
         }
 
     def notify_approval(self, invocation_id, peer, target_type, target_name):
@@ -660,7 +677,8 @@ class FederationService:
 
     # ---- outbound channel (lower-AS initiates) ------------------------
 
-    async def open_channel(self, peer_as: int, router_id: str, host: str, port: int):
+    async def open_channel(self, peer_as: int, router_id: str, host: str, port: int,
+                           transport: "Optional[str]" = None):
         if not self._en2n_allowed():
             logger.info("iN2N Member role — not opening outbound eN2N channel (FR-014)")
             return
@@ -754,8 +772,10 @@ class FederationService:
             # so the reconnect supervisor re-dials this current address instead of a
             # stale one (the live bug the packet capture surfaced). A bad dial that
             # raises before here leaves the prior good address intact.
+            # Feature 108 (T008): persist transport alongside endpoint on successful dial.
             self.manager.upsert_peer(peer_as, router_id,
-                                     endpoint_host=host, endpoint_port=port)
+                                     endpoint_host=host, endpoint_port=port,
+                                     transport=transport)
             logger.info("Opened NCFED channel to %s", ident)
             # Feature 100 (FR-031): connecting is NOT the same as staying up.
             #
@@ -951,6 +971,17 @@ class FederationService:
                         # FR-023: no endpoint → never dialled. This pre-existing skip is
                         # what makes forget_peer_endpoint (US4) take effect with no
                         # restart, since list_peers() is re-read every iteration.
+                        #
+                        # State MUST NOT be left as "reconnecting" here. Feature 100
+                        # moved _health_for() above this check, which had the side
+                        # effect of initialising every endpoint-less peer to
+                        # "reconnecting" — a claim that we are trying to reach it. We
+                        # are not: it is skipped entirely. The HUD surfaces
+                        # channel_state directly, so five endpoint-less peers were
+                        # rendering as actively failing when nothing is wrong with them
+                        # beyond having no address on file. "unknown" is the honest
+                        # value and restores the pre-100 reading.
+                        h["state"] = "unknown"
                         h["connected_since"] = None
                         continue
                     if now < h["next_retry_at"]:
@@ -1294,6 +1325,15 @@ class FederationService:
         except Exception as e:
             logger.debug("edge progress notify to %s failed: %s", member_id, e)
 
+    @staticmethod
+    def _edge_replay_settle_s() -> float:
+        """How long to let a freshly-connected phone settle before dispatching
+        queued content to it, and how long to wait before the single retry."""
+        try:
+            return max(0.0, float(os.environ.get("N2N_EDGE_REPLAY_SETTLE_S", "3.0")))
+        except ValueError:
+            return 3.0
+
     def _register_edge_channel(self, member_id, ch):
         """Track an edge node's channel; deregister on close and start its
         Border-driven heartbeat loop (T011) — the BASE_FLOOR-equivalent
@@ -1307,6 +1347,77 @@ class FederationService:
         ch.on_close = _deregister
         self.edge_channels[member_id] = ch
         asyncio.create_task(self._edge_heartbeat_loop(member_id, ch))
+        asyncio.create_task(self._flush_edge_queue(member_id, ch))
+
+    async def _flush_edge_queue(self, member_id: str, ch):
+        """Replay anything that piled up while this device was unreachable.
+
+        Oldest-first, and only while this same channel is still the live one —
+        a phone that drops mid-replay keeps the rest of its backlog for the
+        next connect rather than losing it. Delivery failures deliberately do
+        NOT delete the row; they bump `attempts` and stop, because the common
+        cause is the socket dying again (iOS backgrounding), which is exactly
+        the case the queue exists to survive.
+        """
+        pending = self.edge_queue.pending(member_id)
+        if not pending:
+            return
+        # Let the client finish wiring its handlers before dispatching. Measured
+        # 2026-08-10: the Border accepted at 13:57:10.566 and dispatched the
+        # replay 86ms later, and that call timed out after the full 30s — while
+        # ordinary n2n/edge/message pushes on the SAME connection succeeded at
+        # 14:26 and 14:44, and n2n/edge/heartbeat was answered throughout the
+        # 59-minute session. The app was alive; the replay simply arrived before
+        # it was listening. Firing immediately on channel registration was the
+        # bug, not the device.
+        await asyncio.sleep(self._edge_replay_settle_s())
+        if self.edge_channels.get(member_id) is not ch or ch._closed:
+            return
+        logger.info("Replaying %d queued message(s) to edge node %s",
+                    len(pending), member_id)
+        for item in pending:
+            if self.edge_channels.get(member_id) is not ch or ch._closed:
+                logger.info("Edge node %s went away mid-replay — %d message(s) "
+                            "stay queued", member_id, self.edge_queue.depth(member_id))
+                return
+            payload = dict(item["payload"])
+            # Mark the replay so the phone can render it as history rather than
+            # as something that just happened.
+            payload["replayed"] = True
+            payload["queued_at"] = item["enqueued_at"]
+            try:
+                await ch.call("n2n/edge/message", payload, timeout=30.0)
+                self.edge_queue.mark_delivered(item["queue_id"])
+                continue
+            except Exception as e:
+                first_error = e
+            # One retry before giving up on this connection. A single timeout is
+            # usually the client not being ready yet, not a dead device — and
+            # abandoning the whole backlog on one miss meant a phone that stayed
+            # connected for an hour still never received its queued content.
+            self.edge_queue.bump_attempt(item["queue_id"])
+            if self.edge_channels.get(member_id) is not ch or ch._closed:
+                logger.info("Edge node %s went away after a failed replay — "
+                            "%d message(s) stay queued", member_id,
+                            self.edge_queue.depth(member_id))
+                return
+            logger.info("Replay to %s failed (%s) — retrying once",
+                        member_id, first_error)
+            await asyncio.sleep(self._edge_replay_settle_s())
+            if self.edge_channels.get(member_id) is not ch or ch._closed:
+                return
+            try:
+                await ch.call("n2n/edge/message", payload, timeout=30.0)
+                self.edge_queue.mark_delivered(item["queue_id"])
+            except Exception as e:
+                self.edge_queue.bump_attempt(item["queue_id"])
+                logger.warning("Queued replay to %s failed twice (%s) — %d "
+                               "message(s) stay queued for the next connect",
+                               member_id, e, self.edge_queue.depth(member_id))
+                return
+        self.audit.record(direction="outbound", peer_identity=member_id,
+                          target_type="edge_push", target_name="queue_replay",
+                          decision="pushed", outcome="success", channel_kind="in2n")
 
     async def _edge_heartbeat_once(self, member_id: str, ch) -> bool:
         """One heartbeat check (contract §4): call n2n/edge/heartbeat on the
@@ -1471,6 +1582,17 @@ class FederationService:
         channel.peer_identity = member_id
         channel.trusted = True
         self._register_edge_channel(member_id, channel)
+        # Spec 106: a successful reconnect used to log NOTHING, so the journal
+        # showed "Accepted edge WS dial-in (awaiting device auth)" followed by a
+        # channel close with nothing in between — indistinguishable from an auth
+        # that never completed. A phone that authenticates and drops seconds
+        # later (iOS suspending a backgrounded socket) is a real, recurring
+        # state, and diagnosing it needs both ends of the channel's life
+        # recorded. The queue depth is here because it decides whether the
+        # replay that follows has anything to send.
+        logger.info("Edge node %s authenticated (source=%s, %d queued)",
+                    member_id, self._edge_channel_source(channel),
+                    self.edge_queue.depth(member_id))
         return {"risk": self.risk.get_risk().get("risk_name"), "trusted": True,
                "member_state": "active"}
 
@@ -1551,6 +1673,22 @@ class FederationService:
             "already_resolved": result["already_resolved"],
         }
 
+    async def _edge_on_approvals_list(self, channel, params):
+        """Live count of currently-pending approvals for `PendingApprovalsIntent`
+        (spec 111, US2, research.md R3). Calls the EXISTING
+        `Authorizer.pending_approvals()` unchanged — risk-wide, not filtered by
+        `channel.member_id`, matching this system's existing single-approver-
+        per-risk model (the same assumption `push_to_edge` already makes for
+        approval delivery). Deliberately NOT served from `EdgeQueue` replay or
+        any push-accumulated cache: an approval already delivered once to an
+        earlier connection but still unresolved would silently be missed by
+        either, which would violate FR-006's "live... not a stale/cached
+        value" requirement (research.md R3)."""
+        from .edge import RpcError
+        if not channel.trusted or not channel.member_id:
+            raise RpcError(-32023, "edge node not authenticated")
+        return {"count": len(self.authz.pending_approvals())}
+
     async def _edge_on_ask(self, channel, params):
         """Phone asks the Border something (feature 067, US1/US2/US3): create
         a delegated_task (feature 053, TaskManager) and run a real agent turn
@@ -1576,6 +1714,12 @@ class FederationService:
         # accompanying text (FR-005) -- text is required only in the
         # ABSENCE of an attachment.
         attachment = params.get("attachment")
+        # spec 117 (Pass 3, FR-003): an optional marker, currently only ever
+        # sent as "voice" by the phone's Siri headless path. Forwarded
+        # as-is to run_agent_turn() below -- no validation needed here,
+        # since run_agent_turn's own _normalize_origin() (spec 116) already
+        # treats anything it doesn't recognize as None.
+        origin = params.get("origin")
         if not text and not attachment:
             raise RpcError(-32602, "text or attachment required")
         member_id = channel.member_id
@@ -1642,7 +1786,8 @@ class FederationService:
                 output, tokens = await run_agent_turn(
                     prompt, session_key=session_key, untrusted=False,
                     message_file=message_file,
-                    timeout_s=timeout_s, on_stall=on_stall)
+                    timeout_s=timeout_s, on_stall=on_stall,
+                    origin=origin)
             finally:
                 if message_file:
                     try:
@@ -2036,6 +2181,15 @@ class FederationService:
                 raise RuntimeError("iN2N hub attestation failed — refusing to trust Border")
             logger.info("iN2N: verified hub attestation for %s", risk_name)
         ch.trusted = True   # we pinned the Border endpoint at provisioning
+        # spec 121: by this point we've proven possession of our own pinned key
+        # (self.risk.self_sign(nonce) above) and, if we hold an anchor, verified
+        # Border's hub attestation too — a genuine possession proof, just via
+        # iN2N's pinned-key/signed-nonce mechanism rather than eN2N's TLS
+        # cert-binding one. Without this, channel.attestation stays at
+        # FederationChannel's "self-asserted" default forever, and
+        # negotiate.allows() tier-0-denies n2n/tools/call unconditionally on
+        # every internal channel regardless of how well authenticated it is.
+        ch.attestation = "possession"
         self.border_channel = ch
         logger.info("iN2N: dialed Border %s:%s as %s (%s)", host, port, member_id,
                     {k: v for k, v in resp.items() if k not in ("risk_ca", "hub_attestation")})
